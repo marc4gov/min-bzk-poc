@@ -5,4 +5,4 @@ pub mod storage;
 
 pub use config::{ConfigService, AppConfig};
 pub use inference::MLXEngine;
-pub use storage::{StorageService, ChatHistory, Document, Template};
+pub use storage::{StorageService, ChatHistory, ChatMessage, Document, Template};

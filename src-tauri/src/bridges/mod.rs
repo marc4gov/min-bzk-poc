@@ -1,8 +1,12 @@
+// Placeholder MLX Bridge module
+// This will be properly implemented when MLX Swift SDK is available
+
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::os::raw::c_char;
 
-// Link to the Swift bridge
-#[cfg(target_os = "macos")]
+// Link to the Swift bridge (only when available)
+#[cfg(all(target_os = "macos", feature = "mlx"))]
 #[link(name = "mlx_bridge", kind = "static")]
 extern "C" {
     fn mlx_load_model(path: *const c_char) -> *mut std::ffi::c_void;
@@ -18,6 +22,7 @@ extern "C" {
 }
 
 pub struct MLXBridge {
+    #[cfg(target_os = "macos")]
     model: Option<*mut std::ffi::c_void>,
 }
 
@@ -26,7 +31,7 @@ impl MLXBridge {
         Self { model: None }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "mlx"))]
     pub fn load_model(&mut self, path: &str) -> Result<(), String> {
         let c_path = CString::new(path).map_err(|e| e.to_string())?;
         let model = unsafe { mlx_load_model(c_path.as_ptr()) };
@@ -39,15 +44,17 @@ impl MLXBridge {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "mlx")))]
     pub fn load_model(&mut self, _path: &str) -> Result<(), String> {
-        Err("MLX is only supported on macOS".to_string())
+        Err("MLX bridge not available - enable 'mlx' feature and run on macOS".to_string())
     }
 
+    #[cfg(target_os = "macos")]
     pub fn generate<F>(&self, prompt: &str, temp: f32, top_p: f32, max_tokens: i32, _callback: F)
     where
         F: FnMut(&str),
     {
+        #[cfg(feature = "mlx")]
         if let Some(model) = self.model {
             let c_prompt = CString::new(prompt).unwrap();
             unsafe {
@@ -56,20 +63,32 @@ impl MLXBridge {
                     F: FnMut(&str),
                 {
                     // Note: This is a simplified implementation
-                    // A proper implementation would need to manage the callback context
                 }
                 mlx_generate(model, c_prompt.as_ptr(), temp, top_p, max_tokens, trampoline::<F>);
             }
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn generate<F>(&self, _prompt: &str, _temp: f32, _top_p: f32, _max_tokens: i32, _callback: F)
+    where
+        F: FnMut(&str),
+    {
+        // No-op on non-macOS
+    }
 }
 
 impl Drop for MLXBridge {
+    #[cfg(target_os = "macos")]
     fn drop(&mut self) {
+        #[cfg(feature = "mlx")]
         if let Some(model) = self.model {
             unsafe { mlx_unload_model(model) };
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn drop(&mut self) {}
 }
 
 impl Default for MLXBridge {

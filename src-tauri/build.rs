@@ -1,36 +1,40 @@
 fn main() {
     tauri_build::build();
 
-    // Compile Swift bridge on macOS
+    // Compile Swift bridge on macOS - optional
     #[cfg(target_os = "macos")]
     {
-        let swift_files = vec!["bridges/mlx.swift"];
         let out_dir = std::env::var("OUT_DIR").unwrap();
+        let swift_file = "src-tauri/bridges/mlx.swift";
+        let lib_path = format!("{}/libmlx_bridge.a", out_dir);
 
-        for swift_file in swift_files {
+        // Check if swiftc is available
+        let swiftc_available = std::process::Command::new("swiftc")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if swiftc_available {
             let output = std::process::Command::new("swiftc")
                 .arg("-emit-library")
                 .arg("-O")
-                .arg("-target")
-                .arg("x86_64-apple-macosx")
                 .arg("-o")
-                .arg(format!("{}/libmlx_bridge.a", out_dir))
-                .arg(format!("src-tauri/{}", swift_file))
+                .arg(&lib_path)
+                .arg(swift_file)
                 .output();
 
             match output {
-                Ok(result) => {
-                    if !result.status.success() {
-                        eprintln!("Swift compilation failed: {}", String::from_utf8_lossy(&result.stderr));
-                    }
+                Ok(result) if result.status.success() => {
+                    println!("cargo:rustc-link-lib=static=mlx_bridge");
+                    println!("cargo:rustc-link-search=native={}", out_dir);
                 }
-                Err(e) => {
-                    eprintln!("Failed to execute swiftc: {}", e);
+                _ => {
+                    println!("cargo:warning=Swift bridge compilation failed, continuing without it");
                 }
             }
+        } else {
+            println!("cargo:warning=swiftc not found, skipping MLX bridge compilation");
         }
-
-        println!("cargo:rustc-link-lib=static=mlx_bridge");
-        println!("cargo:rustc-link-search=native={}", out_dir);
     }
 }

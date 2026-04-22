@@ -1,17 +1,24 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { ChatView } from './components/ChatView';
 import { HistorySidebar } from './components/HistorySidebar';
 import { DocumentPanel } from './components/DocumentPanel';
+import { TemplateManager } from './components/TemplateManager';
 import { Button } from './components/ui/Button';
 
-type Tab = 'chat' | 'documents';
+type Tab = 'chat' | 'documents' | 'templates';
 
 function App() {
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('chat');
+  const chatViewRef = useRef<{ insertPrompt: (prompt: string) => void }>(null);
 
   const handleNewChat = () => {
     setCurrentHistoryId(null);
+  };
+
+  const handleApplyTemplate = (template: { prompt_template: string }) => {
+    setActiveTab('chat');
+    chatViewRef.current?.insertPrompt(template.prompt_template);
   };
 
   return (
@@ -37,6 +44,12 @@ function App() {
             >
               Documenten
             </Button>
+            <Button
+              variant={activeTab === 'templates' ? 'primary' : 'ghost'}
+              onClick={() => setActiveTab('templates')}
+            >
+              Templates
+            </Button>
           </div>
           <div className="ml-auto">
             <span className="text-sm text-zinc-400">Local Assistant</span>
@@ -44,13 +57,16 @@ function App() {
         </header>
 
         <main className="flex-1 overflow-hidden">
-          {activeTab === 'chat' ? (
+          {activeTab === 'chat' && (
             <ChatView
+              ref={chatViewRef}
               historyId={currentHistoryId}
               onHistoryChange={setCurrentHistoryId}
             />
-          ) : (
-            <DocumentPanel />
+          )}
+          {activeTab === 'documents' && <DocumentPanel />}
+          {activeTab === 'templates' && (
+            <TemplateManager onApplyTemplate={handleApplyTemplate} />
           )}
         </main>
       </div>

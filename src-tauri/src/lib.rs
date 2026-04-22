@@ -1,7 +1,7 @@
 mod bridges;
 mod commands;
-mod errors;
-mod services;
+pub mod errors;
+pub mod services;
 
 use services::{StorageService, MLXEngine, ConfigService};
 use commands::{ChatState, DocumentState, ConfigState};

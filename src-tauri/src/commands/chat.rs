@@ -1,52 +1,71 @@
+use crate::services::{StorageService, MLXEngine};
 use crate::errors::Result;
-use crate::services::{Conversation, StorageService, Template};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
+use tokio::sync::Mutex;
 
-#[tauri::command]
-pub async fn create_conversation(
-    storage: State<'_, Arc<StorageService>>,
-    title: String,
-) -> Result<Conversation> {
-    storage.create_conversation(&title).await
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequest {
+    pub message: String,
+    pub history_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatResponse {
+    pub history_id: String,
+    pub message_id: String,
+}
+
+pub struct ChatState {
+    pub storage: Arc<StorageService>,
+    pub engine: Arc<Mutex<MLXEngine>>,
 }
 
 #[tauri::command]
-pub async fn get_conversations(
-    storage: State<'_, Arc<StorageService>>,
-) -> Result<Vec<Conversation>> {
-    storage.get_conversations().await
+pub async fn send_message(
+    request: ChatRequest,
+    state: tauri::State<'_, ChatState>,
+) -> Result<ChatResponse> {
+    let history_id = match request.history_id {
+        Some(id) => id,
+        None => {
+            let history = state.storage.create_chat_history("Nieuw gesprek").await?;
+            history.id
+        }
+    };
+
+    // Save user message
+    state.storage.add_chat_message(&history_id, "user", &request.message).await?;
+
+    // TODO: Implement actual inference streaming
+    let response = "Dit is een tijdelijke reactie. MLX integratie volgt.";
+    state.storage.add_chat_message(&history_id, "assistant", response).await?;
+
+    Ok(ChatResponse {
+        history_id,
+        message_id: uuid::Uuid::new_v4().to_string(),
+    })
 }
 
 #[tauri::command]
-pub async fn get_conversation(
-    storage: State<'_, Arc<StorageService>>,
+pub async fn get_histories(
+    state: tauri::State<'_, ChatState>,
+) -> Result<Vec<crate::services::ChatHistory>> {
+    state.storage.get_chat_histories().await
+}
+
+#[tauri::command]
+pub async fn get_history(
     id: String,
-) -> Result<Option<Conversation>> {
-    storage.get_conversation(&id).await
+    state: tauri::State<'_, ChatState>,
+) -> Result<Option<crate::services::ChatHistory>> {
+    state.storage.get_chat_history(&id).await
 }
 
 #[tauri::command]
-pub async fn add_message(
-    storage: State<'_, Arc<StorageService>>,
-    conversation_id: String,
-    role: String,
-    content: String,
-) -> Result<()> {
-    storage.add_message(&conversation_id, &role, &content).await
-}
-
-#[tauri::command]
-pub async fn delete_conversation(
-    storage: State<'_, Arc<StorageService>>,
+pub async fn delete_history(
     id: String,
+    state: tauri::State<'_, ChatState>,
 ) -> Result<()> {
-    storage.delete_conversation(&id).await
-}
-
-#[tauri::command]
-pub async fn get_templates(
-    storage: State<'_, Arc<StorageService>>,
-) -> Result<Vec<Template>> {
-    storage.get_templates().await
+    state.storage.delete_chat_history(&id).await
 }

@@ -1,50 +1,60 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useState } from 'react';
+import { ChatView } from './components/ChatView';
+import { HistorySidebar } from './components/HistorySidebar';
+import { DocumentPanel } from './components/DocumentPanel';
+import { Button } from './components/ui/Button';
+
+type Tab = 'chat' | 'documents';
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>('chat');
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const handleNewChat = () => {
+    setCurrentHistoryId(null);
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <div className="flex h-screen bg-[#0a0a0a]">
+      <HistorySidebar
+        currentHistoryId={currentHistoryId}
+        onSelectHistory={setCurrentHistoryId}
+        onNewChat={handleNewChat}
+      />
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+      <div className="flex-1 flex flex-col">
+        <header className="h-14 bg-[#1a1a1a] border-b border-zinc-800 flex items-center px-4">
+          <div className="flex space-x-2">
+            <Button
+              variant={activeTab === 'chat' ? 'primary' : 'ghost'}
+              onClick={() => setActiveTab('chat')}
+            >
+              Chat
+            </Button>
+            <Button
+              variant={activeTab === 'documents' ? 'primary' : 'ghost'}
+              onClick={() => setActiveTab('documents')}
+            >
+              Documenten
+            </Button>
+          </div>
+          <div className="ml-auto">
+            <span className="text-sm text-zinc-400">Local Assistant</span>
+          </div>
+        </header>
+
+        <main className="flex-1 overflow-hidden">
+          {activeTab === 'chat' ? (
+            <ChatView
+              historyId={currentHistoryId}
+              onHistoryChange={setCurrentHistoryId}
+            />
+          ) : (
+            <DocumentPanel />
+          )}
+        </main>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 

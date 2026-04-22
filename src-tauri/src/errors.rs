@@ -19,6 +19,9 @@ pub enum AppError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("Timestamp parsing error: {0}")]
+    TimestampParse(String),
+
     #[error("Out of memory")]
     OutOfMemory,
 

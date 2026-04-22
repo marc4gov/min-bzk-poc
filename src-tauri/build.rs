@@ -1,40 +1,54 @@
 fn main() {
     tauri_build::build();
 
-    // Compile Swift bridge on macOS - optional
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // Compile Swift bridges on macOS
     #[cfg(target_os = "macos")]
     {
-        let out_dir = std::env::var("OUT_DIR").unwrap();
-        let swift_file = "src-tauri/bridges/mlx.swift";
-        let lib_path = format!("{}/libmlx_bridge.a", out_dir);
+        // Check if llama.swift exists and compile it
+        let llama_swift = "src-tauri/bridges/llama.swift";
+        if std::path::Path::new(llama_swift).exists() {
+            let lib_path = format!("{}/libllama_bridge.a", out_dir);
 
-        // Check if swiftc is available
-        let swiftc_available = std::process::Command::new("swiftc")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if swiftc_available {
-            let output = std::process::Command::new("swiftc")
+            if let Ok(_) = std::process::Command::new("swiftc")
                 .arg("-emit-library")
                 .arg("-O")
                 .arg("-o")
                 .arg(&lib_path)
-                .arg(swift_file)
-                .output();
-
-            match output {
-                Ok(result) if result.status.success() => {
-                    println!("cargo:rustc-link-lib=static=mlx_bridge");
-                    println!("cargo:rustc-link-search=native={}", out_dir);
-                }
-                _ => {
-                    println!("cargo:warning=Swift bridge compilation failed, continuing without it");
-                }
+                .arg(llama_swift)
+                .output()
+            {
+                println!("cargo:rustc-link-lib=static=llama_bridge");
+                println!("cargo:rustc-link-search=native={}", out_dir);
+                println!("cargo:warning=llama bridge compiled successfully");
+            } else {
+                println!("cargo:warning=llama bridge compilation failed, using mock engine");
             }
-        } else {
-            println!("cargo:warning=swiftc not found, skipping MLX bridge compilation");
         }
+
+        // Check if mlx.swift exists and compile it (for MLX backend)
+        let mlx_swift = "src-tauri/bridges/mlx.swift";
+        if std::path::Path::new(mlx_swift).exists() {
+            let lib_path = format!("{}/libmlx_bridge.a", out_dir);
+
+            if let Ok(_) = std::process::Command::new("swiftc")
+                .arg("-emit-library")
+                .arg("-O")
+                .arg("-o")
+                .arg(&lib_path)
+                .arg(mlx_swift)
+                .output()
+            {
+                println!("cargo:rustc-link-lib=static=mlx_bridge");
+                println!("cargo:rustc-link-search=native={}", out_dir);
+                println!("cargo:warning=MLX bridge compiled successfully");
+            }
+        }
+
+        // Link against required system frameworks
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=CoreML");
     }
 }

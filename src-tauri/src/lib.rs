@@ -3,7 +3,7 @@ mod commands;
 pub mod errors;
 pub mod services;
 
-use services::{StorageService, MLXEngine, ConfigService};
+use services::{StorageService, DefaultEngine, ConfigService};
 use commands::{ChatState, DocumentState, ConfigState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -43,7 +43,7 @@ pub fn run() {
 
             let storage = Arc::new(storage);
             let config = Arc::new(Mutex::new(config_service));
-            let engine = Arc::new(Mutex::new(MLXEngine::new()));
+            let engine = Arc::new(Mutex::new(services::create_engine()));
 
             // Create state structs
             let chat_state = ChatState {

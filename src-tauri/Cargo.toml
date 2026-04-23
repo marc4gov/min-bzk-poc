@@ -3,6 +3,11 @@ name = "localassistant"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+llama = []  # Enable llama.cpp integration
+mlx = []    # Enable MLX integration (macOS only)
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.

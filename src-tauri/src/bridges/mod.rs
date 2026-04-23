@@ -4,45 +4,13 @@
 //! - **llama.cpp**: Stable, cross-platform, uses GGUF quantized models
 //! - **MLX**: Apple's native ML framework (experimental, via Swift bridge)
 
-use std::ffi::CString;
-use std::os::raw::c_char;
+pub mod llama_cpp;
+
+pub use llama_cpp::LlamaCppEngine;
+
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::Mutex;
 use futures::stream::{self, Stream};
-
-// Link to llama.cpp static library (when available)
-#[cfg(feature = "llama")]
-#[link(name = "llama", kind = "static")]
-extern "C" {
-    fn llama_load_model(path: *const c_char) -> *mut std::ffi::c_void;
-    fn llama_generate(
-        model: *mut std::ffi::c_void,
-        prompt: *const c_char,
-        temp: f32,
-        top_p: f32,
-        max_tokens: i32,
-        callback: extern "C" fn(*const c_char),
-    );
-    fn llama_unload_model(model: *mut std::ffi::c_void);
-}
-
-// Link to MLX Swift bridge (when available)
-#[cfg(all(target_os = "macos", feature = "mlx"))]
-#[link(name = "mlx_bridge", kind = "static")]
-extern "C" {
-    fn mlx_load_model(path: *const c_char) -> *mut std::ffi::c_void;
-    fn mlx_generate(
-        model: *mut std::ffi::c_void,
-        prompt: *const c_char,
-        temp: f32,
-        top_p: f32,
-        max_tokens: i32,
-        callback: extern "C" fn(*const c_char),
-    );
-    fn mlx_unload_model(model: *mut std::ffi::c_void);
-}
 
 use crate::errors::{AppError, Result};
 

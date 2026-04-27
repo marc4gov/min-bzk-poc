@@ -15,6 +15,7 @@ thiserror = "1.0"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 async-trait = "0.1.89"
+chrono = "0.4.44"
 
 [dev-dependencies]
 tokio-test = "0.4"

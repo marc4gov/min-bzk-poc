@@ -1,8 +1,5 @@
+use agent_service::create_app;
 use anyhow::Result;
-use axum::{
-    routing::get,
-    Router,
-};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -14,8 +11,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let app = Router::new()
-        .route("/health", get(health_check));
+    let app = create_app().await;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     tracing::info!("Agent service listening on {}", addr);
@@ -24,8 +20,4 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health_check() -> &'static str {
-    "OK"
 }

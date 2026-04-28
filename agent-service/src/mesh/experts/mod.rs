@@ -2,6 +2,7 @@ pub mod rust_expert;
 pub mod frontend_expert;
 pub mod research_expert;
 pub mod schrijver_expert;
+pub mod pii_stripper_expert;
 
 pub use rust_expert::{
     RustExpert, spawn_rust_expert, spawn_rust_expert_with_peers, spawn_rust_expert_with_timeout,
@@ -17,4 +18,8 @@ pub use research_expert::{
 pub use schrijver_expert::{
     SchrijverExpert, spawn_schrijver_expert, spawn_schrijver_expert_with_peers,
     spawn_schrijver_expert_with_timeout,
+};
+pub use pii_stripper_expert::{
+    PIIStripperExpert, PIIResult, spawn_pii_stripper_expert, spawn_pii_stripper_expert_with_peers,
+    spawn_pii_stripper_expert_with_timeout,
 };

@@ -3,6 +3,7 @@ pub mod frontend_expert;
 pub mod research_expert;
 pub mod schrijver_expert;
 pub mod pii_stripper_expert;
+pub mod reviewer_expert;
 
 pub use rust_expert::{
     RustExpert, spawn_rust_expert, spawn_rust_expert_with_peers, spawn_rust_expert_with_timeout,
@@ -22,4 +23,8 @@ pub use schrijver_expert::{
 pub use pii_stripper_expert::{
     PIIStripperExpert, PIIResult, spawn_pii_stripper_expert, spawn_pii_stripper_expert_with_peers,
     spawn_pii_stripper_expert_with_timeout,
+};
+pub use reviewer_expert::{
+    ReviewAnnotation, ReviewerExpert, spawn_reviewer_expert, spawn_reviewer_expert_with_peers,
+    spawn_reviewer_expert_with_timeout,
 };

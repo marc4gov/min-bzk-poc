@@ -3,7 +3,7 @@ mod commands;
 pub mod errors;
 pub mod services;
 
-use services::{StorageService, DefaultEngine, ConfigService};
+use services::{StorageService, ConfigService};
 use commands::{ChatState, DocumentState, ConfigState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -16,21 +16,21 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            // Initialize tracing
-            tracing_subscriber::fmt::init();
+            // Initialize tracing with limited output (only errors and warnings)
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .init();
 
-            // Get config directory
-            let config_dir = app.path().app_config_dir()
-                .expect("Failed to get config dir");
+            // Use project directory for data (development mode)
+            let project_dir = std::env::current_dir()
+                .expect("Failed to get current dir");
+            std::fs::create_dir_all(&project_dir).expect("Failed to create project dir");
+
+            let config_dir = project_dir.join("config");
             std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
-            // Get data directory
-            let data_dir = app.path().app_data_dir()
-                .expect("Failed to get data dir");
-            std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
-
             // Initialize services using block_on
-            let db_path = data_dir.join("localassistant.db");
+            let db_path = project_dir.join("localassistant.db");
             let storage = tauri::async_runtime::block_on(async {
                 StorageService::new(db_path).await
                     .expect("Failed to init storage")
@@ -89,10 +89,19 @@ pub fn run() {
             commands::chat::get_histories,
             commands::chat::get_history,
             commands::chat::delete_history,
+            commands::chat::delete_all_histories,
             commands::document::extract_text,
             commands::document::get_documents,
             commands::config::get_config,
             commands::config::update_config,
+            commands::config::get_templates,
+            commands::model::get_available_models,
+            commands::model::get_downloaded_models,
+            commands::model::download_model,
+            commands::model::delete_model,
+            commands::agent::agent_chat,
+            commands::agent::list_agents,
+            commands::agent::ollama_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

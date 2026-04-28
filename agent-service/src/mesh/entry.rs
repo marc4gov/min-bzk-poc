@@ -2,33 +2,16 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::mesh::types::{SessionContext, MeshSignal, RegistryMsg};
+use crate::mesh::types::{EntryMsg, MeshSignal, RegistryMsg};
 use crate::mesh::expert::{ExpertMsg, WorkEnvelope, WorkPayload};
 
 const MAX_PENDING_REQUESTS: usize = 100;
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
-pub enum EntryMsg {
-    SubmitRequest {
-        query: String,
-        context: SessionContext,
-        reply_to: Option<ActorRef<EntryMsg>>,
-    },
-    ExpertResponse {
-        trace_id: Uuid,
-        result: String,
-    },
-    Cancel {
-        trace_id: Uuid,
-    },
-    CancelAll,
-}
-
-#[derive(Debug, Clone)]
 pub struct PendingRequest {
     pub trace_id: Uuid,
-    pub original_context: SessionContext,
+    pub original_context: crate::mesh::types::SessionContext,
     pub reply_to: Option<ActorRef<EntryMsg>>,
     pub expert: Option<ActorRef<ExpertMsg>>,
     pub created_at: std::time::Instant,
@@ -38,7 +21,7 @@ pub struct PendingRequest {
 impl PendingRequest {
     pub fn new(
         trace_id: Uuid,
-        original_context: SessionContext,
+        original_context: crate::mesh::types::SessionContext,
         reply_to: Option<ActorRef<EntryMsg>>,
     ) -> Self {
         Self {
@@ -56,6 +39,7 @@ impl PendingRequest {
     }
 }
 
+#[derive(Clone)]
 pub struct EntryActor {
     registry: Option<ActorRef<RegistryMsg>>,
     pending_requests: HashMap<Uuid, PendingRequest>,
@@ -108,12 +92,29 @@ impl EntryActor {
     fn triage_capability(&self, query: &str) -> String {
         let query_lower = query.to_lowercase();
 
-        if query_lower.contains("rust") || query_lower.contains("memory") || query_lower.contains("thread") {
+        if query_lower.contains("rust")
+            || query_lower.contains("memory")
+            || query_lower.contains("thread")
+            || query_lower.contains("wasm")
+        {
             "rust".to_string()
-        } else if query_lower.contains("frontend") || query_lower.contains("ui") || query_lower.contains("react") {
+        } else if query_lower.contains("frontend")
+            || query_lower.contains("ui")
+            || query_lower.contains("react")
+        {
             "frontend".to_string()
         } else if query_lower.contains("database") || query_lower.contains("sql") {
             "database".to_string()
+        } else if query_lower.contains("research") || query_lower.contains("scrape") || query_lower.contains("gather") {
+            "research".to_string()
+        } else if query_lower.contains("write") || query_lower.contains("draft") || query_lower.contains("compose") {
+            "write".to_string()
+        } else if query_lower.contains("pii") || query_lower.contains("anonymize") || query_lower.contains("scrub") {
+            "pii".to_string()
+        } else if query_lower.contains("review") || query_lower.contains("critique") || query_lower.contains("edit") {
+            "review".to_string()
+        } else if query_lower.contains("document") || query_lower.contains("create doc") {
+            "document".to_string()
         } else {
             "general".to_string()
         }
@@ -123,7 +124,11 @@ impl EntryActor {
         self.experts.get(capability).cloned()
     }
 
-    fn deliver_final_result(&self, trace_id: Uuid, result: String, reply_to: Option<ActorRef<EntryMsg>>) {
+    fn deliver_final_response(
+        trace_id: Uuid,
+        result: String,
+        reply_to: Option<ActorRef<EntryMsg>>,
+    ) {
         if let Some(reply_to_ref) = reply_to {
             let _ = reply_to_ref.cast(EntryMsg::ExpertResponse {
                 trace_id,
@@ -132,8 +137,8 @@ impl EntryActor {
         }
     }
 
-    fn broadcast_cancel(&self, trace_id: Uuid) {
-        if let Some(request) = self.pending_requests.get(&trace_id) {
+    fn cancel_downstream(trace_id: Uuid, state: &EntryActor) {
+        if let Some(request) = state.pending_requests.get(&trace_id) {
             if let Some(expert) = &request.expert {
                 let _ = expert.cast(ExpertMsg::MeshSignal(MeshSignal::Cancel));
             }
@@ -167,7 +172,7 @@ impl Actor for EntryActor {
         _myself: ActorRef<Self::Msg>,
         args: Option<ActorRef<RegistryMsg>>,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let mut state = EntryActor::new();
+        let mut state = self.clone();
         if let Some(registry) = args {
             state.set_registry(registry);
         }
@@ -186,7 +191,7 @@ impl Actor for EntryActor {
 
                 if state.pending_requests.len() >= MAX_PENDING_REQUESTS {
                     tracing::warn!("Too many pending requests, rejecting new request");
-                    state.deliver_final_result(
+                    EntryActor::deliver_final_response(
                         Uuid::new_v4(),
                         "Error: Too many pending requests".to_string(),
                         reply_to,
@@ -214,26 +219,19 @@ impl Actor for EntryActor {
                         payload: WorkPayload::Query(query.clone()),
                         context,
                         reply_to: None,
+                        entry_reply: Some(myself.clone()),
                         trace_id,
                         hop_count: 0,
                     };
 
                     let _ = expert_ref.cast(ExpertMsg::Work(work_envelope));
-                    state.pending_requests.insert(trace_id, request.clone());
-
-                    if let Some(original_reply_to) = request.reply_to {
-                        state.deliver_final_result(
-                            trace_id,
-                            format!("Routed to {} expert. Trace ID: {}", capability, trace_id),
-                            Some(original_reply_to),
-                        );
-                    }
+                    state.pending_requests.insert(trace_id, request);
                 } else {
                     tracing::warn!(
                         capability = %capability,
                         "No expert found for capability"
                     );
-                    state.deliver_final_result(
+                    EntryActor::deliver_final_response(
                         trace_id,
                         format!("Error: No expert found for capability: {}", capability),
                         reply_to,
@@ -244,9 +242,10 @@ impl Actor for EntryActor {
                 if let Some(request) = state.pending_requests.remove(&trace_id) {
                     tracing::info!(
                         trace_id = %trace_id,
-                        result = %result,
+                        result_len = result.len(),
                         "Final expert response received"
                     );
+                    EntryActor::deliver_final_response(trace_id, result, request.reply_to);
                 } else {
                     tracing::warn!(
                         trace_id = %trace_id,
@@ -255,12 +254,10 @@ impl Actor for EntryActor {
                 }
             }
             EntryMsg::Cancel { trace_id } => {
-                if state.pending_requests.remove(&trace_id).is_some() {
-                    tracing::info!(
-                        trace_id = %trace_id,
-                        "Canceling request"
-                    );
-                    state.broadcast_cancel(trace_id);
+                if state.pending_requests.contains_key(&trace_id) {
+                    EntryActor::cancel_downstream(trace_id, state);
+                    state.pending_requests.remove(&trace_id);
+                    tracing::info!(trace_id = %trace_id, "Canceled request after downstream signal");
                 } else {
                     tracing::warn!(
                         trace_id = %trace_id,
@@ -274,12 +271,16 @@ impl Actor for EntryActor {
                     "Canceling all pending requests"
                 );
 
-                let trace_ids: Vec<Uuid> = state.pending_requests.keys().copied().collect();
+                let snapshots: Vec<(Uuid, ActorRef<ExpertMsg>)> = state
+                    .pending_requests
+                    .iter()
+                    .filter_map(|(id, r)| Some((*id, r.expert.clone()?)))
+                    .collect();
 
-                for trace_id in trace_ids {
-                    state.pending_requests.remove(&trace_id);
-                    state.broadcast_cancel(trace_id);
+                for (_, expert) in &snapshots {
+                    let _ = expert.cast(ExpertMsg::MeshSignal(MeshSignal::Cancel));
                 }
+                state.pending_requests.clear();
             }
         }
         Ok(())
@@ -297,6 +298,7 @@ pub async fn spawn_entry_actor_with_timeout(
     registry: Option<ActorRef<RegistryMsg>>,
     timeout_secs: u64,
 ) -> Result<ActorRef<EntryMsg>, Box<dyn std::error::Error>> {
-    let (actor_ref, _) = Actor::spawn(None, EntryActor::with_timeout(timeout_secs), registry).await?;
+    let (actor_ref, _) =
+        Actor::spawn(None, EntryActor::with_timeout(timeout_secs), registry).await?;
     Ok(actor_ref)
 }

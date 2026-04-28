@@ -42,6 +42,24 @@ pub enum ErrorStrategy {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorkflowStep {
+    Research,
+    Write,
+    ScrubPII,
+    Review,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowState {
+    pub trace_id: Uuid,
+    pub current_step: WorkflowStep,
+    pub accumulated_results: HashMap<WorkflowStep, String>,
+    pub error_strategy: ErrorStrategy,
+    pub retry_count: u32,
+    pub reply_to: Option<ActorRef<EntryMsg>>,
+}
+
 const MAX_HOPS: u32 = 5;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const TIMER_INTERVAL_SECS: u64 = 10;

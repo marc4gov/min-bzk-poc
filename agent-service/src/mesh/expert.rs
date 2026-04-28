@@ -1,12 +1,13 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::mesh::types::{MeshSignal, SessionContext};
 
 const MAX_HOPS: u32 = 5;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const TIMER_INTERVAL_SECS: u64 = 10;
 
 #[derive(Debug, Clone)]
 pub enum WorkPayload {
@@ -32,6 +33,7 @@ pub enum ExpertMsg {
         result: String,
     },
     MeshSignal(MeshSignal),
+    TimerTick,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ pub struct PendingTask {
     pub created_at: Instant,
     pub hop_count: u32,
     pub capability_requested: String,
+    pub recovery_attempted: bool,
 }
 
 impl PendingTask {
@@ -61,6 +64,7 @@ impl PendingTask {
             created_at: Instant::now(),
             hop_count,
             capability_requested,
+            recovery_attempted: false,
         }
     }
 
@@ -86,6 +90,7 @@ pub struct ExpertState {
     pub capabilities: Vec<String>,
     pub pending_tasks: HashMap<Uuid, PendingTask>,
     pub timeout_secs: u64,
+    pub timer_enabled: bool,
 }
 
 impl ExpertState {
@@ -95,11 +100,17 @@ impl ExpertState {
             capabilities,
             pending_tasks: HashMap::new(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
+            timer_enabled: true,
         }
     }
 
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn with_timer(mut self, enabled: bool) -> Self {
+        self.timer_enabled = enabled;
         self
     }
 
@@ -109,7 +120,7 @@ impl ExpertState {
 
     pub fn cleanup_expired_tasks(&mut self) -> Vec<Uuid> {
         let now = Instant::now();
-        let timeout = std::time::Duration::from_secs(self.timeout_secs);
+        let timeout = Duration::from_secs(self.timeout_secs);
 
         let expired: Vec<Uuid> = self
             .pending_tasks
@@ -123,6 +134,106 @@ impl ExpertState {
         }
 
         expired
+    }
+
+    pub fn recover_expired_tasks(&mut self, myself: &ActorRef<ExpertMsg>) -> Vec<Uuid> {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(self.timeout_secs);
+
+        let expired: Vec<(Uuid, PendingTask)> = self
+            .pending_tasks
+            .iter()
+            .filter(|(_, task)| {
+                now.duration_since(task.created_at) > timeout && !task.recovery_attempted
+            })
+            .map(|(id, task)| (*id, task.clone()))
+            .collect();
+
+        let mut recovered = Vec::new();
+
+        for (trace_id, task) in expired {
+            tracing::warn!(
+                trace_id = %trace_id,
+                capability = %task.capability_requested,
+                "Pending task expired, initiating recovery"
+            );
+
+            if let Some(ref reply_to) = task.reply_to {
+                let _ = reply_to.cast(ExpertMsg::PeerResponse {
+                    trace_id,
+                    result: format!("Timeout: Peer at '{}' did not respond for capability '{}'",
+                        task.capability_requested, self.name),
+                });
+            }
+
+            if let Some(ref peer) = task.peer {
+                tracing::info!(
+                    trace_id = %trace_id,
+                    "Sending cancel signal to unresponsive peer"
+                );
+                let _ = peer.cast(ExpertMsg::MeshSignal(MeshSignal::Cancel));
+            }
+
+            let mut updated_task = task.clone();
+            updated_task.recovery_attempted = true;
+            self.pending_tasks.insert(trace_id, updated_task);
+
+            recovered.push(trace_id);
+        }
+
+        recovered
+    }
+
+    pub fn purge_expired_tasks(&mut self) -> Vec<PendingTask> {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(self.timeout_secs);
+        let recovery_timeout = Duration::from_secs(self.timeout_secs + 5);
+
+        let purged: Vec<PendingTask> = self
+            .pending_tasks
+            .iter()
+            .filter(|(_, task)| {
+                let elapsed = now.duration_since(task.created_at);
+                elapsed > recovery_timeout || (elapsed > timeout && task.recovery_attempted)
+            })
+            .map(|(_, task)| task.clone())
+            .collect();
+
+        for task in &purged {
+            self.pending_tasks.remove(&task.trace_id);
+        }
+
+        purged
+    }
+
+    pub fn propagate_poison_pill(&mut self, trace_id: Option<Uuid>) {
+        tracing::info!(
+            expert = %self.name,
+            pending = self.pending_tasks.len(),
+            trace_id = ?trace_id,
+            "Propagating poison pill (cancel signal)"
+        );
+
+        if let Some(id) = trace_id {
+            if let Some(task) = self.pending_tasks.get(&id) {
+                if let Some(ref peer) = task.peer {
+                    tracing::debug!(
+                        trace_id = %id,
+                        peer = ?peer,
+                        "Sending cancel to peer"
+                    );
+                    let _ = peer.cast(ExpertMsg::MeshSignal(MeshSignal::Cancel));
+                }
+            }
+            self.pending_tasks.remove(&id);
+        } else {
+            for (trace_id, task) in &self.pending_tasks {
+                if let Some(ref peer) = task.peer {
+                    let _ = peer.cast(ExpertMsg::MeshSignal(MeshSignal::Cancel));
+                }
+            }
+            self.pending_tasks.clear();
+        }
     }
 
     pub fn can_delegate(&self, hop_count: u32) -> bool {
@@ -165,6 +276,22 @@ impl BatonPass {
             capability_requested,
             envelope.hop_count,
         )
+    }
+
+    pub fn create_pending_task_with_peer(
+        envelope: &WorkEnvelope,
+        capability_requested: String,
+        peer: ActorRef<ExpertMsg>,
+    ) -> PendingTask {
+        let mut task = PendingTask::new(
+            envelope.trace_id,
+            envelope.context.clone(),
+            envelope.reply_to.clone(),
+            capability_requested,
+            envelope.hop_count,
+        );
+        task.peer = Some(peer);
+        task
     }
 
     pub fn respond_to_original(
@@ -216,16 +343,36 @@ impl Actor for ExpertState {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: (String, Vec<String>),
     ) -> Result<Self::State, ActorProcessingErr> {
         let (name, capabilities) = args;
-        Ok(ExpertState::new(name, capabilities))
+        let mut state = ExpertState::new(name, capabilities);
+
+        if state.timer_enabled {
+            let myself_clone = myself.clone();
+            let interval = Duration::from_secs(TIMER_INTERVAL_SECS);
+
+            tokio::spawn(async move {
+                let mut timer = tokio::time::interval(interval);
+                loop {
+                    timer.tick().await;
+                    let _ = myself_clone.cast(ExpertMsg::TimerTick);
+                }
+            });
+
+            tracing::debug!(
+                timer_interval_secs = TIMER_INTERVAL_SECS,
+                "Stability timer started"
+            );
+        }
+
+        Ok(state)
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -245,8 +392,6 @@ impl Actor for ExpertState {
                     }
                     return Ok(());
                 }
-
-                state.cleanup_expired_tasks();
 
                 match &envelope.payload {
                     WorkPayload::Query(q) => {
@@ -312,13 +457,25 @@ impl Actor for ExpertState {
             }
             ExpertMsg::MeshSignal(signal) => match signal {
                 MeshSignal::Cancel => {
-                    tracing::info!(
-                        expert = %state.name,
-                        "Cancel signal received, clearing pending tasks"
-                    );
-                    state.pending_tasks.clear();
+                    state.propagate_poison_pill(None);
                 }
             },
+            ExpertMsg::TimerTick => {
+                if state.timer_enabled {
+                    let recovered = state.recover_expired_tasks(&_myself);
+                    let purged = state.purge_expired_tasks();
+
+                    if !recovered.is_empty() || !purged.is_empty() {
+                        tracing::debug!(
+                            expert = %state.name,
+                            recovered = recovered.len(),
+                            purged = purged.len(),
+                            remaining = state.pending_tasks.len(),
+                            "Timer tick: stability maintenance"
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }

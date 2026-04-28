@@ -220,11 +220,25 @@ impl Actor for FrontendExpert {
                     tracing::info!(
                         expert = %state.base.name,
                         pending = state.base.pending_tasks.len(),
-                        "Cancel signal received"
+                        "Cancel signal received (poison pill)"
                     );
                     state.base.pending_tasks.clear();
                 }
             },
+            ExpertMsg::TimerTick => {
+                let recovered = state.base.recover_expired_tasks(&_myself);
+                let purged = state.base.purge_expired_tasks();
+
+                if !recovered.is_empty() || !purged.is_empty() {
+                    tracing::debug!(
+                        expert = %state.base.name,
+                        recovered = recovered.len(),
+                        purged = purged.len(),
+                        remaining = state.base.pending_tasks.len(),
+                        "Timer tick: stability maintenance"
+                    );
+                }
+            }
         }
         Ok(())
     }

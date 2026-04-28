@@ -1,8 +1,10 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::mesh::types::RegistryMsg;
+
+const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 
 pub struct RegistryActor {
     capabilities: HashMap<String, Vec<ActorRef<RegistryMsg>>>,
@@ -15,7 +17,7 @@ impl RegistryActor {
         Self {
             capabilities: HashMap::new(),
             health_map: HashMap::new(),
-            heartbeat_timeout_secs: 30,
+            heartbeat_timeout_secs: HEARTBEAT_TIMEOUT_SECS,
         }
     }
 
@@ -27,9 +29,9 @@ impl RegistryActor {
         }
     }
 
-    fn cleanup_stale_actors(&mut self) {
+    fn cleanup_stale_actors(&mut self) -> Vec<String> {
         let now = Instant::now();
-        let timeout = std::time::Duration::from_secs(self.heartbeat_timeout_secs);
+        let timeout = Duration::from_secs(self.heartbeat_timeout_secs);
 
         let stale_ids: Vec<String> = self
             .health_map
@@ -38,12 +40,27 @@ impl RegistryActor {
             .map(|(id, _)| id.clone())
             .collect();
 
-        for id in stale_ids {
-            self.remove_actor(&id);
+        for id in &stale_ids {
+            self.remove_actor(id);
         }
+
+        if !stale_ids.is_empty() {
+            tracing::debug!(
+                count = stale_ids.len(),
+                active = self.health_map.len(),
+                "Health monitor: removed stale actors"
+            );
+        }
+
+        stale_ids
     }
 
     fn remove_actor(&mut self, actor_id: &str) {
+        tracing::info!(
+            actor_id = %actor_id,
+            "Removing stale actor from registry"
+        );
+
         self.health_map.remove(actor_id);
 
         for actors in self.capabilities.values_mut() {

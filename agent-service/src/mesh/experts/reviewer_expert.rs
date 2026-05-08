@@ -1,12 +1,16 @@
+//! **ReviewerExpert** — heuristische regels (regellengte, TODO, criteria). Geschikt voor preflight checks;
+//! diepgaande inhoudelijke review hoort bij een LM of menselijke QA.
+//! Retourneert **de volledige tekst** met review-aanwijzingen in dezelfde output (geen los rapport zonder body).
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-use crate::mesh::types::{EntryMsg, MeshSignal};
 use crate::mesh::expert::{
-    send_work_output, BatonPass, ExpertMsg, ExpertState, PeerMap, WorkEnvelope, WorkPayload,
-    ReviewCriteria,
+    deliver_peer_response_result, send_work_output, BatonPass, ExpertMsg, ExpertState, PeerMap,
+    ReviewCriteria, WorkEnvelope, WorkPayload,
 };
+use crate::mesh::live::emit_mesh;
+use crate::mesh::types::MeshSignal;
 
 const REVIEWER_CAPABILITIES: &[&str] = &["review", "critique", "edit"];
 
@@ -20,7 +24,6 @@ pub struct ReviewAnnotation {
 
 pub struct ReviewerExpert {
     base: ExpertState,
-    review_templates: HashMap<String, Vec<String>>,
     processed_count: u64,
     peers: Option<PeerMap>,
     mesh_events: Option<broadcast::Sender<crate::AgentEvent>>,
@@ -30,32 +33,14 @@ impl ReviewerExpert {
     pub fn new() -> Self {
         let base = ExpertState::new(
             "ReviewerExpert".to_string(),
-            REVIEWER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
-        );
-
-        let mut review_templates = HashMap::new();
-        review_templates.insert(
-            "clarity".to_string(),
-            vec![
-                "Consider rewriting for clarity".to_string(),
-                "This sentence could be more concise".to_string(),
-            ],
-        );
-        review_templates.insert(
-            "grammar".to_string(),
-            vec!["Check grammar and punctuation".to_string()],
-        );
-        review_templates.insert(
-            "structure".to_string(),
-            vec![
-                "Consider restructuring this paragraph".to_string(),
-                "Add headings for better organization".to_string(),
-            ],
+            REVIEWER_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         );
 
         Self {
             base,
-            review_templates,
             processed_count: 0,
             peers: None,
             mesh_events: None,
@@ -73,7 +58,11 @@ impl ReviewerExpert {
         self
     }
 
-    fn review_document(&mut self, content: &str, criteria: &Option<ReviewCriteria>) -> Vec<ReviewAnnotation> {
+    fn review_document(
+        &mut self,
+        content: &str,
+        criteria: &Option<ReviewCriteria>,
+    ) -> Vec<ReviewAnnotation> {
         self.processed_count += 1;
 
         let mut annotations = Vec::new();
@@ -115,7 +104,10 @@ impl ReviewerExpert {
                     annotations.push(ReviewAnnotation {
                         line_number: 0,
                         severity: "warning".to_string(),
-                        message: format!("Word count {} outside target range ({}, {})", word_count, min, max),
+                        message: format!(
+                            "Word count {} outside target range ({}, {})",
+                            word_count, min, max
+                        ),
                         suggestion: Some("Adjust content length".to_string()),
                     });
                 }
@@ -134,44 +126,86 @@ impl ReviewerExpert {
         annotations
     }
 
-    fn format_review(&self, annotations: &[ReviewAnnotation]) -> String {
-        if annotations.is_empty() {
-            return "=== Review Report ===\n\nStatus: PASSED\n\nNo issues found. Document looks good!".to_string();
-        }
+    /// Volledige brontekst terug, met per regel (en globaal) wat er moet gebeuren.
+    fn format_document_with_inline_review(
+        &self,
+        content: &str,
+        annotations: &[ReviewAnnotation],
+    ) -> String {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut by_line: HashMap<usize, Vec<&ReviewAnnotation>> = HashMap::new();
+        let mut globals: Vec<&ReviewAnnotation> = Vec::new();
 
-        let mut report = format!(
-            "=== Review Report #{} ===\n\nStatus: NEEDS ATTENTION\n\n",
-            self.processed_count
-        );
-
-        report.push_str(&format!("Found {} issue(s):\n\n", annotations.len()));
-
-        for (i, annotation) in annotations.iter().enumerate() {
-            report.push_str(&format!(
-                "{}. [{}] Line {}: {}\n",
-                i + 1,
-                annotation.severity.to_uppercase(),
-                annotation.line_number,
-                annotation.message
-            ));
-
-            if let Some(ref suggestion) = annotation.suggestion {
-                report.push_str(&format!("   Suggestion: {}\n", suggestion));
+        for a in annotations {
+            if a.line_number == 0 {
+                globals.push(a);
+            } else {
+                by_line.entry(a.line_number).or_default().push(a);
             }
-
-            report.push('\n');
         }
 
-        report.push_str("=== End Review ===");
+        let mut out = String::new();
+        out.push_str("=== Document inclusief review ===\n\n");
 
-        report
+        if annotations.is_empty() {
+            out.push_str("**Status:** geen automatische bevindingen op regelniveau.\n\n");
+            out.push_str("---\n\n");
+            out.push_str(content);
+            out.push_str("\n\n=== Einde ===\n");
+            return out;
+        }
+
+        out.push_str("**Status:** er zijn aanwijzingen onder de betreffende regels.\n\n");
+
+        if !globals.is_empty() {
+            out.push_str("### Algemene review-opmerkingen\n\n");
+            for g in &globals {
+                out.push_str(&format!(
+                    "- **[{}]** {}",
+                    g.severity.to_uppercase(),
+                    g.message
+                ));
+                if let Some(s) = &g.suggestion {
+                    out.push_str(&format!("\n  - *Actie:* {}", s));
+                }
+                out.push_str("\n");
+            }
+            out.push_str("\n---\n\n");
+        }
+
+        out.push_str("### Tekst met review-aanwijzingen\n\n");
+
+        if lines.is_empty() && content.is_empty() {
+            out.push_str("(lege invoer)\n");
+        }
+
+        for (i, line) in lines.iter().enumerate() {
+            let line_no = i + 1;
+            out.push_str(line);
+            out.push('\n');
+            if let Some(anns) = by_line.get(&line_no) {
+                for a in anns {
+                    out.push_str("  ▸ **[");
+                    out.push_str(&a.severity.to_uppercase());
+                    out.push_str("]** ");
+                    out.push_str(&a.message);
+                    if let Some(s) = &a.suggestion {
+                        out.push_str(&format!(" — *te doen:* {}", s));
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+
+        out.push_str("\n=== Einde ===\n");
+        out
     }
 
     fn process_locally(&mut self, envelope: &WorkEnvelope) -> String {
         match &envelope.payload {
             WorkPayload::Review { content, criteria } => {
                 let annotations = self.review_document(content, criteria);
-                let report = self.format_review(&annotations);
+                let report = self.format_document_with_inline_review(content, &annotations);
 
                 tracing::info!(
                     issues_found = annotations.len(),
@@ -183,34 +217,16 @@ impl ReviewerExpert {
             _ => "ReviewerExpert: Please provide Review payload with content".to_string(),
         }
     }
-
-    fn would_delegate_to_sender(
-        peers: &Option<PeerMap>,
-        target: &str,
-        envelope: &WorkEnvelope,
-    ) -> bool {
-        match (peers.as_ref().and_then(|m| m.get(target)), envelope.reply_to.as_ref()) {
-            (Some(peer), Some(reply)) => reply.get_id() == peer.get_id(),
-            _ => false,
-        }
-    }
-
-    fn query_slice(payload: &WorkPayload) -> &str {
-        match payload {
-            WorkPayload::Query(q) => q.as_str(),
-            WorkPayload::Process(p) => p.as_str(),
-            WorkPayload::Delegate { capability, .. } => capability.as_str(),
-            WorkPayload::Review { .. } => "review",
-            _ => "",
-        }
-    }
 }
 
 #[async_trait::async_trait]
 impl Actor for ReviewerExpert {
     type Msg = ExpertMsg;
     type State = ReviewerExpert;
-    type Arguments = (Option<PeerMap>, Option<broadcast::Sender<crate::AgentEvent>>);
+    type Arguments = (
+        Option<PeerMap>,
+        Option<broadcast::Sender<crate::AgentEvent>>,
+    );
 
     async fn pre_start(
         &self,
@@ -244,17 +260,18 @@ impl Actor for ReviewerExpert {
                 }
 
                 let result = state.process_locally(&envelope);
+                emit_mesh(
+                    &state.mesh_events,
+                    &state.base.name,
+                    "review_klaar",
+                    "Review uitgevoerd",
+                );
                 send_work_output(&envelope, result);
                 Ok(())
             }
             ExpertMsg::PeerResponse { trace_id, result } => {
                 if let Some(task) = state.base.pending_tasks.remove(&trace_id) {
-                    if let Some(ref gateway) = task.entry_reply {
-                        let _ = gateway.cast(EntryMsg::ExpertResponse {
-                            trace_id,
-                            result,
-                        });
-                    }
+                    deliver_peer_response_result(&task, trace_id, result);
                 }
                 Ok(())
             }
@@ -284,13 +301,19 @@ pub async fn spawn_reviewer_expert_with_peers(
     peers: PeerMap,
     mesh_events: Option<broadcast::Sender<crate::AgentEvent>>,
 ) -> Result<ActorRef<ExpertMsg>, Box<dyn std::error::Error>> {
-    let (actor_ref, _) = Actor::spawn(None, ReviewerExpert::new(), (Some(peers), mesh_events)).await?;
+    let (actor_ref, _) =
+        Actor::spawn(None, ReviewerExpert::new(), (Some(peers), mesh_events)).await?;
     Ok(actor_ref)
 }
 
 pub async fn spawn_reviewer_expert_with_timeout(
     timeout_secs: u64,
 ) -> Result<ActorRef<ExpertMsg>, Box<dyn std::error::Error>> {
-    let (actor_ref, _) = Actor::spawn(None, ReviewerExpert::with_timeout(timeout_secs), (None, None)).await?;
+    let (actor_ref, _) = Actor::spawn(
+        None,
+        ReviewerExpert::with_timeout(timeout_secs),
+        (None, None),
+    )
+    .await?;
     Ok(actor_ref)
 }

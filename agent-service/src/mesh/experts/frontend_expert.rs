@@ -2,14 +2,14 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-use crate::mesh::types::{EntryMsg, MeshSignal};
 use crate::mesh::expert::{
     send_work_output, BatonPass, ExpertError, ExpertMsg, ExpertState, PeerMap, WorkEnvelope,
-    WorkPayload,
+    WorkPayload, MAX_DELEGATION_DEPTH,
 };
+use crate::mesh::types::{EntryMsg, MeshSignal};
+use crate::mesh::ollama_bridge::chat_via_ollama_for_mesh_with_events;
 
 const FRONTEND_CAPABILITIES: &[&str] = &["frontend", "ui", "react", "vue", "svelte", "css"];
-const MAX_DELEGATION_DEPTH: u32 = 3;
 
 pub struct FrontendExpert {
     base: ExpertState,
@@ -23,7 +23,10 @@ impl FrontendExpert {
     pub fn new() -> Self {
         let base = ExpertState::new(
             "FrontendExpert".to_string(),
-            FRONTEND_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            FRONTEND_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         );
 
         let mut domain_knowledge = HashMap::new();
@@ -102,7 +105,14 @@ impl FrontendExpert {
                 return format!("FrontendExpert: Review request forwarded to ReviewerExpert");
             }
             WorkPayload::CreateDocument { .. } => {
-                return format!("FrontendExpert: Document creation forwarded to DocumentOrchestrator");
+                return format!(
+                    "FrontendExpert: Document creation forwarded to DocumentOrchestrator"
+                );
+            }
+            WorkPayload::ImproveDocument { .. } => {
+                return format!(
+                    "FrontendExpert: Document improvement forwarded to DocumentImprover"
+                );
             }
         };
 
@@ -127,7 +137,12 @@ impl FrontendExpert {
         )
     }
 
-    fn should_delegate(&self, query: &str, hop_count: u32, envelope: &WorkEnvelope) -> Option<String> {
+    fn should_delegate(
+        &self,
+        query: &str,
+        hop_count: u32,
+        envelope: &WorkEnvelope,
+    ) -> Option<String> {
         if hop_count >= MAX_DELEGATION_DEPTH {
             return None;
         }
@@ -154,7 +169,10 @@ impl FrontendExpert {
         target: &str,
         envelope: &WorkEnvelope,
     ) -> bool {
-        match (peers.as_ref().and_then(|m| m.get(target)), envelope.reply_to.as_ref()) {
+        match (
+            peers.as_ref().and_then(|m| m.get(target)),
+            envelope.reply_to.as_ref(),
+        ) {
             (Some(peer), Some(reply)) => reply.get_id() == peer.get_id(),
             _ => false,
         }
@@ -170,6 +188,7 @@ impl FrontendExpert {
             WorkPayload::ScrubPII { .. } => "pii",
             WorkPayload::Review { .. } => "review",
             WorkPayload::CreateDocument { .. } => "document",
+            WorkPayload::ImproveDocument { .. } => "improve-doc",
         }
     }
 
@@ -195,13 +214,17 @@ impl FrontendExpert {
             WorkPayload::ScrubPII { .. } => "pii".to_string(),
             WorkPayload::Review { .. } => "review".to_string(),
             WorkPayload::CreateDocument { .. } => "document".to_string(),
+            WorkPayload::ImproveDocument { .. } => "improve-doc".to_string(),
         };
 
         let delegated =
             BatonPass::prepare_delegation(envelope, myself.clone(), WorkPayload::Query(sub));
 
-        let pending_task =
-            BatonPass::create_pending_task_with_peer(envelope, target_capability.clone(), peer.clone());
+        let pending_task = BatonPass::create_pending_task_with_peer(
+            envelope,
+            target_capability.clone(),
+            peer.clone(),
+        );
         self.base.store_pending_task(pending_task);
 
         tracing::info!(
@@ -220,7 +243,10 @@ impl FrontendExpert {
 impl Actor for FrontendExpert {
     type Msg = ExpertMsg;
     type State = FrontendExpert;
-    type Arguments = (Option<PeerMap>, Option<broadcast::Sender<crate::AgentEvent>>);
+    type Arguments = (
+        Option<PeerMap>,
+        Option<broadcast::Sender<crate::AgentEvent>>,
+    );
 
     async fn pre_start(
         &self,
@@ -258,8 +284,7 @@ impl Actor for FrontendExpert {
                     Self::query_slice(&envelope.payload),
                     envelope.hop_count,
                     &envelope,
-                )
-                {
+                ) {
                     let target_cap = delegation_target.clone();
                     match state.handle_delegation(&envelope, delegation_target, &myself) {
                         Ok(()) => {
@@ -286,19 +311,15 @@ impl Actor for FrontendExpert {
                 let q_slice = Self::query_slice(&envelope.payload);
                 let mut replied = false;
                 if crate::mesh::ollama_bridge::mesh_ollama_enabled() {
-                    match crate::mesh::ollama_bridge::chat_via_ollama_for_mesh(
+                    match chat_via_ollama_for_mesh_with_events(
                         &state.base.name,
                         q_slice,
+                        None,
+                        &state.mesh_events,
                     )
                     .await
                     {
                         Ok(text) => {
-                            crate::mesh::live::emit_mesh(
-                                &state.mesh_events,
-                                &state.base.name,
-                                "ollama",
-                                &format!("{}", text.trim()),
-                            );
                             send_work_output(
                                 &envelope,
                                 format!("[{} · Ollama] {}", state.base.name, text),
@@ -363,8 +384,7 @@ impl Actor for FrontendExpert {
                         "Peer response received, resuming processing"
                     );
 
-                    let final_result =
-                        format!("{} (peer-assisted): {}", state.base.name, result);
+                    let final_result = format!("{} (peer-assisted): {}", state.base.name, result);
 
                     if let Some(ref parent) = task.reply_to {
                         let _ = parent.cast(ExpertMsg::PeerResponse {
@@ -419,14 +439,19 @@ pub async fn spawn_frontend_expert_with_peers(
     peers: PeerMap,
     mesh_events: Option<broadcast::Sender<crate::AgentEvent>>,
 ) -> Result<ActorRef<ExpertMsg>, Box<dyn std::error::Error>> {
-    let (actor_ref, _) = Actor::spawn(None, FrontendExpert::new(), (Some(peers), mesh_events)).await?;
+    let (actor_ref, _) =
+        Actor::spawn(None, FrontendExpert::new(), (Some(peers), mesh_events)).await?;
     Ok(actor_ref)
 }
 
 pub async fn spawn_frontend_expert_with_timeout(
     timeout_secs: u64,
 ) -> Result<ActorRef<ExpertMsg>, Box<dyn std::error::Error>> {
-    let (actor_ref, _) =
-        Actor::spawn(None, FrontendExpert::with_timeout(timeout_secs), (None, None)).await?;
+    let (actor_ref, _) = Actor::spawn(
+        None,
+        FrontendExpert::with_timeout(timeout_secs),
+        (None, None),
+    )
+    .await?;
     Ok(actor_ref)
 }

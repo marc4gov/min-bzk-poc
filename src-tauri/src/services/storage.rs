@@ -53,7 +53,8 @@ impl StorageService {
         }
 
         let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))?
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .pragma("foreign_keys", "1"); // Enable foreign keys
 
         let pool = SqlitePool::connect_with(options).await?;
 
@@ -312,11 +313,31 @@ impl StorageService {
     }
 
     pub async fn delete_chat_history(&self, id: &str) -> Result<()> {
+        // First delete all messages (in case FK cascade isn't working)
+        sqlx::query("DELETE FROM chat_messages WHERE history_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        // Then delete the history
         sqlx::query("DELETE FROM chat_histories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn delete_all_chat_histories(&self) -> Result<usize> {
+        // Delete all messages first
+        sqlx::query("DELETE FROM chat_messages")
+            .execute(&self.pool)
+            .await?;
+
+        // Then delete all histories and return count
+        let result = sqlx::query("DELETE FROM chat_histories")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
     }
 
     pub async fn get_templates(&self) -> Result<Vec<Template>> {

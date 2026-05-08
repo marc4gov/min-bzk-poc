@@ -9,20 +9,18 @@ use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 
 use agent_service::mesh::entry::EntryActor;
-use agent_service::mesh::{
-    spawn_frontend_expert,
-    spawn_frontend_expert_with_peers,
-    spawn_rust_expert,
-    spawn_research_expert,
-    spawn_schrijver_expert,
-    spawn_pii_stripper_expert,
-    spawn_reviewer_expert,
-    spawn_document_orchestrator,
+use agent_service::mesh::expert::{
+    BatonPass, ErrorStrategy, ExpertMsg, ExpertState, PIICategory, ReviewCriteria, StyleProfile,
+    WorkEnvelope, WorkPayload,
 };
 use agent_service::mesh::experts::RustExpert;
-use agent_service::mesh::expert::{BatonPass, ExpertMsg, ExpertState, WorkEnvelope, WorkPayload, StyleProfile, PIICategory, ReviewCriteria, ErrorStrategy};
 use agent_service::mesh::registry::spawn_registry;
 use agent_service::mesh::types::{EntryMsg, MeshSignal, RegistryMsg, SessionContext};
+use agent_service::mesh::{
+    spawn_document_orchestrator, spawn_frontend_expert, spawn_frontend_expert_with_peers,
+    spawn_pii_stripper_expert, spawn_research_expert, spawn_reviewer_expert, spawn_rust_expert,
+    spawn_schrijver_expert,
+};
 
 /// Vangt `EntryMsg::ExpertResponse` op voor synchrone asserts in tests.
 struct CaptureClient {
@@ -40,9 +38,7 @@ impl Actor for CaptureClient {
         _: ActorRef<Self::Msg>,
         tx: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(CaptureClient {
-            sender: Some(tx),
-        })
+        Ok(CaptureClient { sender: Some(tx) })
     }
 
     async fn handle(
@@ -84,21 +80,13 @@ async fn multi_hop_success_test() {
     entry_actor.register_expert("frontend".to_owned(), frontend_expert);
 
     let (tx, rx) = oneshot::channel::<String>();
-    let (capture_ref, _) = ractor::Actor::spawn(
-        None,
-        CaptureClient { sender: None },
-        tx,
-    )
+    let (capture_ref, _) = ractor::Actor::spawn(None, CaptureClient { sender: None }, tx)
         .await
         .expect("CaptureClient");
 
-    let (entry_ref, _) = ractor::Actor::spawn(
-        None,
-        entry_actor,
-        Some(registry.clone()),
-    )
-    .await
-    .expect("EntryActor");
+    let (entry_ref, _) = ractor::Actor::spawn(None, entry_actor, Some(registry.clone()))
+        .await
+        .expect("EntryActor");
 
     let context = SessionContext {
         session_id: uuid::Uuid::new_v4(),
@@ -186,11 +174,7 @@ async fn actor_failure_recovery_test() {
     sleep(Duration::from_secs(2)).await;
 
     let expired_ids = expert_state.cleanup_expired_tasks();
-    assert_eq!(
-        expired_ids.len(),
-        1,
-        "Eén verouderde taak wordt verwijderd"
-    );
+    assert_eq!(expired_ids.len(), 1, "Eén verouderde taak wordt verwijderd");
 }
 
 #[tokio::test]
@@ -350,12 +334,18 @@ async fn baton_pass_delegation_test() {
         hop_count: 0,
     };
 
-    let delegated =
-        BatonPass::prepare_delegation(&envelope, rust_actor.clone(), WorkPayload::Query("sub".into()));
+    let delegated = BatonPass::prepare_delegation(
+        &envelope,
+        rust_actor.clone(),
+        WorkPayload::Query("sub".into()),
+    );
 
     assert_eq!(delegated.hop_count, 1);
     assert_eq!(delegated.trace_id, envelope.trace_id);
-    assert!(delegated.reply_to.is_some(), "delegatie zet ouder als reply");
+    assert!(
+        delegated.reply_to.is_some(),
+        "delegatie zet ouder als reply"
+    );
 
     tracing::info!("baton_pass_delegation_test ok");
 }
@@ -382,7 +372,9 @@ async fn research_expert_test() {
         hop_count: 0,
     };
 
-    research_expert.cast(ExpertMsg::Work(envelope)).expect("send work");
+    research_expert
+        .cast(ExpertMsg::Work(envelope))
+        .expect("send work");
 
     sleep(Duration::from_millis(100)).await;
 
@@ -404,7 +396,11 @@ async fn pii_stripper_expert_test() {
     let envelope = WorkEnvelope {
         payload: WorkPayload::ScrubPII {
             content: test_content.to_string(),
-            pii_categories: vec![PIICategory::Email, PIICategory::PhoneNumber, PIICategory::Name],
+            pii_categories: vec![
+                PIICategory::Email,
+                PIICategory::PhoneNumber,
+                PIICategory::Name,
+            ],
         },
         context: context.clone(),
         reply_to: None,
@@ -413,7 +409,9 @@ async fn pii_stripper_expert_test() {
         hop_count: 0,
     };
 
-    pii_expert.cast(ExpertMsg::Work(envelope)).expect("send work");
+    pii_expert
+        .cast(ExpertMsg::Work(envelope))
+        .expect("send work");
 
     sleep(Duration::from_millis(100)).await;
 
@@ -444,7 +442,9 @@ async fn schrijver_expert_test() {
         hop_count: 0,
     };
 
-    schrijver_expert.cast(ExpertMsg::Work(envelope)).expect("send work");
+    schrijver_expert
+        .cast(ExpertMsg::Work(envelope))
+        .expect("send work");
 
     sleep(Duration::from_millis(100)).await;
 
@@ -479,7 +479,9 @@ async fn reviewer_expert_test() {
         hop_count: 0,
     };
 
-    reviewer_expert.cast(ExpertMsg::Work(envelope)).expect("send work");
+    reviewer_expert
+        .cast(ExpertMsg::Work(envelope))
+        .expect("send work");
 
     sleep(Duration::from_millis(100)).await;
 
@@ -488,7 +490,7 @@ async fn reviewer_expert_test() {
 
 #[tokio::test]
 async fn document_orchestrator_workflow_test() {
-    let registry = spawn_registry().await.expect("registry");
+    let _registry = spawn_registry().await.expect("registry");
 
     let research_expert = spawn_research_expert(None).await.expect("researcher");
     let schrijver_expert = spawn_schrijver_expert(None).await.expect("schrijver");
@@ -501,7 +503,9 @@ async fn document_orchestrator_workflow_test() {
     peers.insert("pii".to_string(), pii_expert.clone());
     peers.insert("review".to_string(), reviewer_expert.clone());
 
-    let orchestrator = spawn_document_orchestrator(peers).await.expect("orchestrator");
+    let orchestrator = spawn_document_orchestrator(peers)
+        .await
+        .expect("orchestrator");
 
     let context = SessionContext {
         session_id: uuid::Uuid::new_v4(),
@@ -528,7 +532,9 @@ async fn document_orchestrator_workflow_test() {
         hop_count: 0,
     };
 
-    orchestrator.cast(ExpertMsg::Work(envelope)).expect("send work");
+    orchestrator
+        .cast(ExpertMsg::Work(envelope))
+        .expect("send work");
 
     sleep(Duration::from_secs(1)).await;
 

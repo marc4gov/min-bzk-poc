@@ -22,6 +22,8 @@ uuid = { version = "1.7", features = ["v4", "serde"] }
 ractor = { version = "0.9", features = ["serde"] }
 async-trait = "0.1"
 thiserror = "1.0"
+dotenvy = "0.15"
+html2text = "0.14"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -15,6 +15,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Initialize tracing with limited output (only errors and warnings)
             tracing_subscriber::fmt()
@@ -92,6 +93,7 @@ pub fn run() {
             commands::chat::delete_all_histories,
             commands::document::extract_text,
             commands::document::get_documents,
+            commands::document::upload_document_for_improvement,
             commands::config::get_config,
             commands::config::update_config,
             commands::config::get_templates,
@@ -99,7 +101,11 @@ pub fn run() {
             commands::model::get_downloaded_models,
             commands::model::download_model,
             commands::model::delete_model,
+            commands::agent::mesh_demo,
+            commands::agent::mesh_document,
+            commands::agent::mesh_improve_document,
             commands::agent::agent_chat,
+            commands::agent::agent_health,
             commands::agent::list_agents,
             commands::agent::ollama_models,
         ])

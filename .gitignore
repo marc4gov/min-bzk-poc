@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Lokale secrets / machine-specifieke env (agent-service laadt `.env` bij start)
+agent-service/.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -22,3 +25,20 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust-build
+**/target/
+
+# GGUF-modellen (groot; GitHub-limieten)
+*.gguf
+models/
+
+# Tauri lokale SQLite
+src-tauri/*.db
+
+# Optionele vendorbron lokaal
+third-party/llama.cpp/
+
+# Python
+__pycache__/
+*.pyc

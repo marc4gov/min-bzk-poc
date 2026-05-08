@@ -1,6 +1,6 @@
 use ractor::ActorRef;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContext {
@@ -41,6 +41,32 @@ pub enum RegistryMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MeshSignal {
     Cancel,
+}
+
+/// Gateway-berichten (entry-acteur). Hier gedefinieerd om cycles `entry` ↔ `expert` te vermijden.
+#[derive(Debug, Clone)]
+pub enum EntryMsg {
+    SubmitRequest {
+        query: String,
+        context: SessionContext,
+        reply_to: Option<ActorRef<EntryMsg>>,
+    },
+    /// Document upload met inhoud en instructies
+    SubmitDocument {
+        filename: String,
+        content: String,
+        instructions: String,
+        context: SessionContext,
+        reply_to: Option<ActorRef<EntryMsg>>,
+    },
+    ExpertResponse {
+        trace_id: Uuid,
+        result: String,
+    },
+    Cancel {
+        trace_id: Uuid,
+    },
+    CancelAll,
 }
 
 impl<M> Envelope<M> {

@@ -142,15 +142,13 @@ impl Actor for RegistryActor {
                 capability,
                 reply_to,
             } => {
-                let actors = state.handle_resolve_capability(capability.clone());
-
-                if let Some(reply_to_ref) = reply_to {
-                    for _actor_ref in actors {
-                        let _ = reply_to_ref.cast(RegistryMsg::ResolveCapability {
-                            capability: capability.clone(),
-                            reply_to: None,
-                        });
-                    }
+                let n = state.handle_resolve_capability(capability.clone()).len();
+                if reply_to.is_some() {
+                    tracing::debug!(
+                        capability = %capability,
+                        matches = n,
+                        "ResolveCapability (control-plane; expert discovery loopt via Entry)"
+                    );
                 }
             }
             RegistryMsg::Heartbeat { actor } => {

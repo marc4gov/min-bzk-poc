@@ -2,11 +2,128 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::mesh::types::{EntryMsg, MeshSignal, RegistryMsg};
 use crate::mesh::expert::{ExpertMsg, WorkEnvelope, WorkPayload};
+use crate::mesh::research_http;
+use crate::mesh::types::{EntryMsg, MeshSignal, RegistryMsg};
 
 const MAX_PENDING_REQUESTS: usize = 100;
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+/// Triage op woorden zoals „rust”; URL’s worden genegeerd (`rust-lang.org` ⇒ geen `rust`-deskundige).
+fn text_without_urls_lower(query: &str) -> String {
+    let mut t = query.to_string();
+    for u in research_http::extract_http_urls_from_text(query) {
+        t = t.replace(&u, " ");
+    }
+    t.to_lowercase()
+}
+
+fn has_document_pipeline_intent_text(q_lower: &str) -> bool {
+    const INTENT: &[&str] = &[
+        "samenvat",
+        "summar",
+        "rapport",
+        "verslag",
+        "document",
+        "brief",
+        "schrijf",
+        "maak ",
+        "maak een",
+        "genereer",
+        "create ",
+        "draft ",
+        "publicatie",
+        "stakeholder",
+        "officie",
+        "formele",
+        "formeel",
+        "memo",
+        "board deck",
+        "voor het team",
+        "for the team",
+        "uitleggen aan",
+        "meetwaardig",
+        "explain to management",
+        "report",
+        "summary ",
+    ];
+    INTENT.iter().any(|t| q_lower.contains(t))
+}
+
+fn connector_phrases_suggest_pipeline(q_lower: &str) -> bool {
+    q_lower.contains("op basis van")
+        || q_lower.contains("gebaseerd op")
+        || q_lower.contains("based on")
+        || q_lower.contains("using this ")
+        || q_lower.contains("van deze pagina")
+        || q_lower.contains("from this url")
+        || q_lower.contains("lees deze ")
+        || q_lower.contains("read this page")
+        || q_lower.contains("gebruik deze link")
+}
+
+/// Minstens één http(s)-URL én formulering die richting de meerstaps **CreateDocument**-workflow wijst
+/// (bv. rapportage, samenvatting voor anderen, verbonden aan “op basis van …”).
+///
+/// Bewust geen alleen‑URL‑match om “wat staat er op deze site?” (lookup) nog naar `research`/`general` te laten gaan.
+fn infer_document_pipeline_from_natural_query(query: &str) -> bool {
+    if research_http::extract_http_urls_from_text(query).is_empty() {
+        return false;
+    }
+    let q = query.trim().to_lowercase();
+
+    // Korte informatieve lookup zonder tekst‑output‑intent (“wat is deze site”).
+    let t = q.trim_start();
+    if (t.starts_with("wat is ")
+        || t.starts_with("wie is ")
+        || t.starts_with("what is ")
+        || t.starts_with("who is ")
+        || t.starts_with("wat zijn ")
+        || t.starts_with("where is "))
+        && !has_document_pipeline_intent_text(&q)
+        && !connector_phrases_suggest_pipeline(&q)
+    {
+        return false;
+    }
+
+    connector_phrases_suggest_pipeline(&q) || (has_document_pipeline_intent_text(&q))
+}
+
+/// Zelfde triage-logica als [`EntryActor`] — gebruikt door mesh‑demo (`full_mesh`) voor document-route.
+#[must_use]
+pub fn triage_entry_capability(query: &str) -> String {
+    if infer_document_pipeline_from_natural_query(query) {
+        return "document".to_string();
+    }
+
+    let query_lower = query.to_lowercase();
+    let no_url = text_without_urls_lower(query);
+
+    if no_url.contains("rust")
+        || no_url.contains("memory")
+        || no_url.contains("thread")
+        || no_url.contains("wasm")
+    {
+        "rust".to_string()
+    } else if no_url.contains("frontend") || no_url.contains("ui") || no_url.contains("react") {
+        "frontend".to_string()
+    } else if no_url.contains("database") || query_lower.contains("sql") {
+        "database".to_string()
+    } else if no_url.contains("research") || no_url.contains("scrape") || no_url.contains("gather")
+    {
+        "research".to_string()
+    } else if no_url.contains("write") || no_url.contains("draft") || no_url.contains("compose") {
+        "write".to_string()
+    } else if no_url.contains("pii") || no_url.contains("anonymize") || no_url.contains("scrub") {
+        "pii".to_string()
+    } else if no_url.contains("review") || no_url.contains("critique") || no_url.contains("edit") {
+        "review".to_string()
+    } else if query_lower.contains("document") || query_lower.contains("create doc") {
+        "document".to_string()
+    } else {
+        "general".to_string()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
@@ -90,34 +207,7 @@ impl EntryActor {
     }
 
     fn triage_capability(&self, query: &str) -> String {
-        let query_lower = query.to_lowercase();
-
-        if query_lower.contains("rust")
-            || query_lower.contains("memory")
-            || query_lower.contains("thread")
-            || query_lower.contains("wasm")
-        {
-            "rust".to_string()
-        } else if query_lower.contains("frontend")
-            || query_lower.contains("ui")
-            || query_lower.contains("react")
-        {
-            "frontend".to_string()
-        } else if query_lower.contains("database") || query_lower.contains("sql") {
-            "database".to_string()
-        } else if query_lower.contains("research") || query_lower.contains("scrape") || query_lower.contains("gather") {
-            "research".to_string()
-        } else if query_lower.contains("write") || query_lower.contains("draft") || query_lower.contains("compose") {
-            "write".to_string()
-        } else if query_lower.contains("pii") || query_lower.contains("anonymize") || query_lower.contains("scrub") {
-            "pii".to_string()
-        } else if query_lower.contains("review") || query_lower.contains("critique") || query_lower.contains("edit") {
-            "review".to_string()
-        } else if query_lower.contains("document") || query_lower.contains("create doc") {
-            "document".to_string()
-        } else {
-            "general".to_string()
-        }
+        triage_entry_capability(query)
     }
 
     fn find_expert_for_capability(&self, capability: &str) -> Option<ActorRef<ExpertMsg>> {
@@ -130,10 +220,7 @@ impl EntryActor {
         reply_to: Option<ActorRef<EntryMsg>>,
     ) {
         if let Some(reply_to_ref) = reply_to {
-            let _ = reply_to_ref.cast(EntryMsg::ExpertResponse {
-                trace_id,
-                result,
-            });
+            let _ = reply_to_ref.cast(EntryMsg::ExpertResponse { trace_id, result });
         }
     }
 
@@ -186,7 +273,11 @@ impl Actor for EntryActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            EntryMsg::SubmitRequest { query, context, reply_to } => {
+            EntryMsg::SubmitRequest {
+                query,
+                context,
+                reply_to,
+            } => {
                 state.cleanup_expired_requests();
 
                 if state.pending_requests.len() >= MAX_PENDING_REQUESTS {
@@ -234,6 +325,66 @@ impl Actor for EntryActor {
                     EntryActor::deliver_final_response(
                         trace_id,
                         format!("Error: No expert found for capability: {}", capability),
+                        reply_to,
+                    );
+                }
+            }
+            EntryMsg::SubmitDocument {
+                filename,
+                content,
+                instructions,
+                context,
+                reply_to,
+            } => {
+                state.cleanup_expired_requests();
+
+                if state.pending_requests.len() >= MAX_PENDING_REQUESTS {
+                    tracing::warn!("Too many pending requests, rejecting document upload");
+                    EntryActor::deliver_final_response(
+                        Uuid::new_v4(),
+                        "Error: Too many pending requests".to_string(),
+                        reply_to,
+                    );
+                    return Ok(());
+                }
+
+                let trace_id = Uuid::new_v4();
+
+                tracing::info!(
+                    trace_id = %trace_id,
+                    filename = %filename,
+                    content_len = content.len(),
+                    "Document upload submitted"
+                );
+
+                // Route naar document-improve expert
+                let expert = state.find_expert_for_capability("improve-doc");
+
+                if let Some(expert_ref) = expert {
+                    let mut request = PendingRequest::new(trace_id, context.clone(), reply_to);
+                    request.expert = Some(expert_ref.clone());
+
+                    let work_envelope = WorkEnvelope {
+                        payload: WorkPayload::ImproveDocument {
+                            content,
+                            filename,
+                            instructions,
+                            pii_categories: vec![],
+                        },
+                        context,
+                        reply_to: None,
+                        entry_reply: Some(myself.clone()),
+                        trace_id,
+                        hop_count: 0,
+                    };
+
+                    let _ = expert_ref.cast(ExpertMsg::Work(work_envelope));
+                    state.pending_requests.insert(trace_id, request);
+                } else {
+                    tracing::warn!("No expert found for improve-doc capability");
+                    EntryActor::deliver_final_response(
+                        trace_id,
+                        "Error: Document verbetering niet beschikbaar".to_string(),
                         reply_to,
                     );
                 }
@@ -301,4 +452,52 @@ pub async fn spawn_entry_actor_with_timeout(
     let (actor_ref, _) =
         Actor::spawn(None, EntryActor::with_timeout(timeout_secs), registry).await?;
     Ok(actor_ref)
+}
+
+#[cfg(test)]
+mod triage_tests {
+    use super::triage_entry_capability;
+
+    #[test]
+    fn triage_priorities_rust_over_react_keyword_order() {
+        assert_eq!(triage_entry_capability("rust and react hooks"), "rust");
+    }
+
+    #[test]
+    fn triage_document() {
+        assert_eq!(
+            triage_entry_capability("Create document from notes"),
+            "document"
+        );
+        assert_eq!(
+            triage_entry_capability("needs a document revision"),
+            "document"
+        );
+    }
+
+    #[test]
+    fn triage_research_before_document_when_both_terms() {
+        assert_eq!(
+            triage_entry_capability("research document corpus on climate"),
+            "research"
+        );
+    }
+
+    #[test]
+    fn nl_vraag_met_url_en_samenvatting_routes_naar_document() {
+        assert_eq!(
+            triage_entry_capability(
+                "Kun je op basis van https://www.rust-lang.org een korte samenvatting voor het team schrijven?"
+            ),
+            "document"
+        );
+    }
+
+    #[test]
+    fn puur_informatieve_lookup_wat_is_geen_document() {
+        assert_ne!(
+            triage_entry_capability("Wat is https://example.org?"),
+            "document"
+        );
+    }
 }

@@ -37,3 +37,5 @@ export interface AppConfig {
   max_tokens: number;
   theme: string;
 }
+
+export * from './agents';

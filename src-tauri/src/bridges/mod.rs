@@ -1,25 +1,25 @@
 //! Inference engine bridges for local LLM execution
 //!
 //! This module provides abstraction over different inference backends:
-//! - **llama.cpp**: Stable, cross-platform, uses GGUF quantized models
-//! - **MLX**: Apple's native ML framework (experimental, via Swift bridge)
+//! - **OllamaEngine**: Ollama HTTP API (stable, recommended)
+//! - **MockEngine**: Instant demo responses (no model needed)
+//! - **CandleEngine**: llama-cli subprocess (requires llama-cli build)
+//! - **LlmEngine**: llama-gguf Rust crate (experimental, may hang)
 
+pub mod ollama;
+pub mod mock;
+pub mod candle;
+pub mod llm_engine;
 pub mod llama_cpp;
 
-pub use llama_cpp::LlamaCppEngine;
+// Use OllamaEngine as default - most stable local LLM option
+pub use ollama::OllamaEngine as DefaultEngine;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures::stream::{self, Stream};
+use futures::stream::Stream;
 
-use crate::errors::{AppError, Result};
-
-/// Inference backend selection
-#[derive(Debug, Clone, Copy)]
-pub enum Backend {
-    LlamaCpp,
-    MLX,
-}
+use crate::errors::Result;
 
 /// Token stream for streaming generation
 pub struct TokenStream {
@@ -39,14 +39,14 @@ impl Stream for TokenStream {
 
 /// Main inference engine abstraction
 pub trait InferenceEngine: Send + Sync {
-    fn load_model(&mut self, path: &std::path::Path) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn load_model(&mut self, path: &std::path::Path) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
     fn generate(
         &self,
         prompt: &str,
         params: GenerationParams,
-    ) -> impl std::future::Future<Output = Result<TokenStream>> + Send;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<TokenStream>> + Send + '_>>;
     fn is_loaded(&self) -> bool;
-    fn unload(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn unload(&mut self) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
 }
 
 /// Generation parameters
@@ -68,233 +68,3 @@ impl Default for GenerationParams {
         }
     }
 }
-
-/// Llama.cpp inference engine (recommended for production)
-#[cfg(feature = "llama")]
-pub struct LlamaEngine {
-    model: Option<*mut std::ffi::c_void>,
-    is_loaded: bool,
-}
-
-#[cfg(feature = "llama")]
-unsafe impl Send for LlamaEngine {}
-
-#[cfg(feature = "llama")]
-impl LlamaEngine {
-    pub fn new() -> Self {
-        Self {
-            model: None,
-            is_loaded: false,
-        }
-    }
-
-    pub async fn load_model_inner(&mut self, path: &std::path::Path) -> Result<()> {
-        let path_str = path.to_str().ok_or_else(|| {
-            AppError::InferenceFailed("Invalid model path".to_string())
-        })?;
-        let c_path = CString::new(path_str).map_err(|e| AppError::Io(e.into()))?;
-
-        let model = unsafe { llama_load_model(c_path.as_ptr()) };
-
-        if model.is_null() {
-            return Err(AppError::ModelNotFound(path_str.to_string()));
-        }
-
-        self.model = Some(model);
-        self.is_loaded = true;
-        tracing::info!("Llama.cpp model loaded from: {}", path_str);
-        Ok(())
-    }
-
-    pub async fn generate_inner(&self, prompt: &str, params: GenerationParams) -> Result<TokenStream> {
-        if !self.is_loaded {
-            return Err(AppError::InferenceFailed("Model not loaded".to_string()));
-        }
-
-        if let Some(model) = self.model {
-            let c_prompt = CString::new(prompt).map_err(|e| AppError::Io(e.into()))?;
-
-            // Create a channel for token streaming
-            let (tx, rx) = std::sync::mpsc::channel();
-
-            // Spawn thread for generation
-            let params_clone = params.clone();
-            std::thread::spawn(move || {
-                extern "C" fn trampoline(
-                    ctx: *const c_char,
-                    tx: *mut std::ffi::c_void,
-                ) {
-                    unsafe {
-                        if !ctx.is_null() {
-                            let s = std::ffi::CStr::from_ptr(ctx).to_string_lossy().to_string();
-                            let tx = &*(tx as *const std::sync::mpsc::Sender<String>);
-                            let _ = tx.send(s);
-                        }
-                    }
-                    // Signal end
-                    let tx = &*(tx as *const std::sync::mpsc::Sender<String>);
-                    let _ = tx.send(String::new()); // Empty string signals end
-                }
-
-                unsafe {
-                    llama_generate(
-                        model,
-                        c_prompt.as_ptr(),
-                        params_clone.temperature,
-                        params_clone.top_p,
-                        params_clone.max_tokens as i32,
-                        trampoline,
-                    );
-                }
-            });
-
-            // Create stream from receiver
-            let stream = stream::repeat_with(move || rx.recv().ok().unwrap_or_default())
-                .take_while(|s| !s.is_empty());
-
-            Ok(TokenStream {
-                inner: stream,
-            })
-        } else {
-            Err(AppError::InferenceFailed("No model loaded".to_string()))
-        }
-    }
-
-    pub fn is_loaded_inner(&self) -> bool {
-        self.is_loaded
-    }
-
-    pub async fn unload_inner(&mut self) -> Result<()> {
-        if let Some(model) = self.model {
-            unsafe { llama_unload_model(model) };
-        }
-        self.model = None;
-        self.is_loaded = false;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "llama")]
-impl Default for LlamaEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "llama")]
-impl Drop for LlamaEngine {
-    fn drop(&mut self) {
-        if let Some(model) = self.model {
-            unsafe { llama_unload_model(model) };
-        }
-    }
-}
-
-/// MLX-based inference engine (experimental, Apple Silicon only)
-#[cfg(all(target_os = "macos", feature = "mlx"))]
-pub struct MLXEngine {
-    model: Option<*mut std::ffi::c_void>,
-    is_loaded: bool,
-}
-
-#[cfg(all(target_os = "macos", feature = "mlx"))]
-impl MLXEngine {
-    pub fn new() -> Self {
-        Self {
-            model: None,
-            is_loaded: false,
-        }
-    }
-
-    pub async fn load_model_inner(&mut self, path: &std::path::Path) -> Result<()> {
-        let path_str = path.to_str().ok_or_else(|| {
-            AppError::InferenceFailed("Invalid model path".to_string())
-        })?;
-        let c_path = CString::new(path_str).map_err(|e| AppError::Io(e.into()))?;
-
-        let model = unsafe { mlx_load_model(c_path.as_ptr()) };
-
-        if model.is_null() {
-            return Err(AppError::ModelNotFound(path_str.to_string()));
-        }
-
-        self.model = Some(model);
-        self.is_loaded = true;
-        tracing::info!("MLX model loaded from: {}", path_str);
-        Ok(())
-    }
-
-    // Similar implementation for generate_inner, etc.
-    pub fn is_loaded_inner(&self) -> bool {
-        self.is_loaded
-    }
-
-    pub async fn unload_inner(&mut self) -> Result<()> {
-        if let Some(model) = self.model {
-            unsafe { mlx_unload_model(model) };
-        }
-        self.model = None;
-        self.is_loaded = false;
-        Ok(())
-    }
-}
-
-#[cfg(all(target_os = "macos", feature = "mlx"))]
-impl Default for MLXEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Fallback engine that returns mock responses (for testing)
-pub struct MockEngine {
-    loaded: bool,
-}
-
-impl MockEngine {
-    pub fn new() -> Self {
-        Self { loaded: false }
-    }
-
-    pub async fn load_model_inner(&mut self, _path: &std::path::Path) -> Result<()> {
-        self.loaded = true;
-        tracing::info!("Mock engine loaded");
-        Ok(())
-    }
-
-    pub async fn generate_inner(&self, prompt: &str, _params: GenerationParams) -> Result<TokenStream> {
-        if !self.loaded {
-            return Err(AppError::InferenceFailed("Model not loaded".to_string()));
-        }
-
-        let response = format!("This is a mock response to: {}\n\nTo enable real inference:\n1. Add llama.cpp library to the project\n2. Enable the 'llama' feature in Cargo.toml\n3. Download a GGUF model file", prompt);
-
-        let stream = Box::pin(stream::iter(vec![response]));
-        Ok(TokenStream { inner: stream })
-    }
-
-    pub fn is_loaded_inner(&self) -> bool {
-        self.loaded
-    }
-
-    pub async fn unload_inner(&mut self) -> Result<()> {
-        self.loaded = false;
-        Ok(())
-    }
-}
-
-impl Default for MockEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Export the appropriate engine based on features
-#[cfg(feature = "llama")]
-pub type DefaultEngine = LlamaEngine;
-
-#[cfg(all(not(feature = "llama"), all(target_os = "macos", feature = "mlx")))]
-pub type DefaultEngine = MLXEngine;
-
-#[cfg(all(not(feature = "llama"), not(feature = "mlx")))]
-pub type DefaultEngine = MockEngine;

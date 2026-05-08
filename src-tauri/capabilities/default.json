@@ -5,7 +5,17 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
     "shell:default",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ],
+  "scopes": [
+    {
+      "allow": ["**"]
+    }
   ]
 }

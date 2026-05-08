@@ -22,9 +22,12 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib_path.display());
             println!("cargo:rustc-link-lib=dylib=llama");
 
-            // Link required frameworks for macOS
+            // Set rpath so the library can be found at runtime
             #[cfg(target_os = "macos")]
             {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_path.display());
+
+                // Link required frameworks for macOS
                 println!("cargo:rustc-link-lib=framework=Foundation");
                 println!("cargo:rustc-link-lib=framework=Metal");
                 println!("cargo:rustc-link-lib=framework=CoreML");

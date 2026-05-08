@@ -2,14 +2,14 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-use crate::mesh::types::{EntryMsg, MeshSignal};
 use crate::mesh::expert::{
     send_work_output, BatonPass, ExpertError, ExpertMsg, ExpertState, PeerMap, WorkEnvelope,
-    WorkPayload,
+    WorkPayload, MAX_DELEGATION_DEPTH,
 };
+use crate::mesh::types::{EntryMsg, MeshSignal};
+use crate::mesh::ollama_bridge::chat_via_ollama_for_mesh_with_events;
 
 const RUST_CAPABILITIES: &[&str] = &["rust", "memory", "thread", "async", "tokio"];
-const MAX_DELEGATION_DEPTH: u32 = 3;
 
 pub struct RustExpert {
     base: ExpertState,
@@ -98,6 +98,9 @@ impl RustExpert {
             WorkPayload::CreateDocument { .. } => {
                 return format!("RustExpert: Document creation forwarded to DocumentOrchestrator");
             }
+            WorkPayload::ImproveDocument { .. } => {
+                return format!("RustExpert: Document improvement forwarded to DocumentImprover");
+            }
         };
 
         for (key, value) in &self.domain_knowledge {
@@ -117,7 +120,12 @@ impl RustExpert {
         )
     }
 
-    fn should_delegate(&self, query: &str, hop_count: u32, envelope: &WorkEnvelope) -> Option<String> {
+    fn should_delegate(
+        &self,
+        query: &str,
+        hop_count: u32,
+        envelope: &WorkEnvelope,
+    ) -> Option<String> {
         if hop_count >= MAX_DELEGATION_DEPTH {
             return None;
         }
@@ -151,7 +159,10 @@ impl RustExpert {
         target: &str,
         envelope: &WorkEnvelope,
     ) -> bool {
-        match (peers.as_ref().and_then(|m| m.get(target)), envelope.reply_to.as_ref()) {
+        match (
+            peers.as_ref().and_then(|m| m.get(target)),
+            envelope.reply_to.as_ref(),
+        ) {
             (Some(peer), Some(reply)) => reply.get_id() == peer.get_id(),
             _ => false,
         }
@@ -167,6 +178,7 @@ impl RustExpert {
             WorkPayload::ScrubPII { .. } => "pii",
             WorkPayload::Review { .. } => "review",
             WorkPayload::CreateDocument { .. } => "document",
+            WorkPayload::ImproveDocument { .. } => "improve-doc",
         }
     }
 
@@ -192,13 +204,17 @@ impl RustExpert {
             WorkPayload::ScrubPII { .. } => "pii".to_string(),
             WorkPayload::Review { .. } => "review".to_string(),
             WorkPayload::CreateDocument { .. } => "document".to_string(),
+            WorkPayload::ImproveDocument { .. } => "improve-doc".to_string(),
         };
 
         let delegated =
             BatonPass::prepare_delegation(envelope, myself.clone(), WorkPayload::Query(sub));
 
-        let pending_task =
-            BatonPass::create_pending_task_with_peer(envelope, target_capability.clone(), peer.clone());
+        let pending_task = BatonPass::create_pending_task_with_peer(
+            envelope,
+            target_capability.clone(),
+            peer.clone(),
+        );
         self.base.store_pending_task(pending_task);
 
         tracing::info!(
@@ -217,7 +233,10 @@ impl RustExpert {
 impl Actor for RustExpert {
     type Msg = ExpertMsg;
     type State = RustExpert;
-    type Arguments = (Option<PeerMap>, Option<broadcast::Sender<crate::AgentEvent>>);
+    type Arguments = (
+        Option<PeerMap>,
+        Option<broadcast::Sender<crate::AgentEvent>>,
+    );
 
     async fn pre_start(
         &self,
@@ -247,10 +266,7 @@ impl Actor for RustExpert {
                         error = %e,
                         "Hop limit exceeded"
                     );
-                    send_work_output(
-                        &envelope,
-                        format!("Error: {}", e),
-                    );
+                    send_work_output(&envelope, format!("Error: {}", e));
                     return Ok(());
                 }
 
@@ -258,8 +274,7 @@ impl Actor for RustExpert {
                     Self::query_slice(&envelope.payload),
                     envelope.hop_count,
                     &envelope,
-                )
-                {
+                ) {
                     let target_cap = delegation_target.clone();
                     match state.handle_delegation(&envelope, delegation_target, &myself) {
                         Ok(()) => {
@@ -286,19 +301,15 @@ impl Actor for RustExpert {
                 let q_slice = Self::query_slice(&envelope.payload);
                 let mut replied = false;
                 if crate::mesh::ollama_bridge::mesh_ollama_enabled() {
-                    match crate::mesh::ollama_bridge::chat_via_ollama_for_mesh(
+                    match chat_via_ollama_for_mesh_with_events(
                         &state.base.name,
                         q_slice,
+                        None,
+                        &state.mesh_events,
                     )
                     .await
                     {
                         Ok(text) => {
-                            crate::mesh::live::emit_mesh(
-                                &state.mesh_events,
-                                &state.base.name,
-                                "ollama",
-                                &format!("{}", text.trim()),
-                            );
                             send_work_output(
                                 &envelope,
                                 format!("[{} · Ollama] {}", state.base.name, text),
@@ -363,8 +374,7 @@ impl Actor for RustExpert {
                         "Peer response received, resuming processing"
                     );
 
-                    let final_result =
-                        format!("{} (peer-assisted): {}", state.base.name, result);
+                    let final_result = format!("{} (peer-assisted): {}", state.base.name, result);
 
                     if let Some(ref parent) = task.reply_to {
                         let _ = parent.cast(ExpertMsg::PeerResponse {

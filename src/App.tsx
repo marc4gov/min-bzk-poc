@@ -1,11 +1,14 @@
 import { useState, useRef } from 'react';
+import { AgentDiagnosticsProvider } from './AgentDiagnosticsProvider';
 import { ChatView } from './components/ChatView';
 import { HistorySidebar } from './components/HistorySidebar';
 import { DocumentPanel } from './components/DocumentPanel';
 import { TemplateManager } from './components/TemplateManager';
+import { MeshDemoPanel } from './components/MeshDemoPanel';
+import { ModelManager } from './components/ModelManager';
 import { Button } from './components/ui/Button';
 
-type Tab = 'chat' | 'documents' | 'templates';
+type Tab = 'chat' | 'documents' | 'templates' | 'models' | 'mesh';
 
 function App() {
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
@@ -22,12 +25,13 @@ function App() {
   };
 
   return (
-    <div className="flex h-screen bg-[#0a0a0a]">
-      <HistorySidebar
-        currentHistoryId={currentHistoryId}
-        onSelectHistory={setCurrentHistoryId}
-        onNewChat={handleNewChat}
-      />
+    <AgentDiagnosticsProvider>
+      <div className="flex h-screen bg-[#0a0a0a]">
+        <HistorySidebar
+          currentHistoryId={currentHistoryId}
+          onSelectHistory={setCurrentHistoryId}
+          onNewChat={handleNewChat}
+        />
 
       <div className="flex-1 flex flex-col">
         <header className="h-14 bg-[#1a1a1a] border-b border-zinc-800 flex items-center px-4">
@@ -50,13 +54,25 @@ function App() {
             >
               Templates
             </Button>
+            <Button
+              variant={activeTab === 'models' ? 'primary' : 'ghost'}
+              onClick={() => setActiveTab('models')}
+            >
+              Modellen
+            </Button>
+            <Button
+              variant={activeTab === 'mesh' ? 'primary' : 'ghost'}
+              onClick={() => setActiveTab('mesh')}
+            >
+              Mesh
+            </Button>
           </div>
           <div className="ml-auto">
             <span className="text-sm text-zinc-400">Local Assistant</span>
           </div>
         </header>
 
-        <main className="flex-1 overflow-hidden">
+        <main className="flex-1 overflow-auto bg-[#0a0a0a]">
           {activeTab === 'chat' && (
             <ChatView
               ref={chatViewRef}
@@ -68,9 +84,12 @@ function App() {
           {activeTab === 'templates' && (
             <TemplateManager onApplyTemplate={handleApplyTemplate} />
           )}
+          {activeTab === 'models' && <ModelManager />}
+          {activeTab === 'mesh' && <MeshDemoPanel />}
         </main>
       </div>
     </div>
+    </AgentDiagnosticsProvider>
   );
 }
 

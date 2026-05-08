@@ -61,6 +61,8 @@ pub struct WorkflowState {
 }
 
 const MAX_HOPS: u32 = 5;
+/// Maximum aantal **delegatie-stappen** per expert (naast de globale [`MAX_HOPS`]-keten).
+pub const MAX_DELEGATION_DEPTH: u32 = 3;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const TIMER_INTERVAL_SECS: u64 = 10;
 
@@ -68,7 +70,10 @@ const TIMER_INTERVAL_SECS: u64 = 10;
 pub enum WorkPayload {
     Query(String),
     Process(String),
-    Delegate { capability: String, payload: String },
+    Delegate {
+        capability: String,
+        payload: String,
+    },
     Research {
         urls: Vec<String>,
         depth: u8,
@@ -91,6 +96,13 @@ pub enum WorkPayload {
         pii_categories: Vec<PIICategory>,
         review_criteria: Option<ReviewCriteria>,
         error_strategy: ErrorStrategy,
+    },
+    /// Verbeter een geüpload document met een specifieke prompt/instructies
+    ImproveDocument {
+        content: String,
+        filename: String,
+        instructions: String,
+        pii_categories: Vec<PIICategory>,
     },
 }
 
@@ -252,14 +264,7 @@ impl ExpertState {
                 task.capability_requested, self.name
             );
 
-            if let Some(ref parent) = task.reply_to {
-                let _ = parent.cast(ExpertMsg::PeerResponse {
-                    trace_id,
-                    result: err.clone(),
-                });
-            } else if let Some(ref gateway) = task.entry_reply {
-                let _ = gateway.cast(EntryMsg::ExpertResponse { trace_id, result: err });
-            }
+            deliver_peer_response_result(&task, trace_id, err);
 
             if let Some(ref peer) = task.peer {
                 tracing::info!(
@@ -390,10 +395,7 @@ impl BatonPass {
         task
     }
 
-    pub fn respond_to_original(
-        result: String,
-        task: &PendingTask,
-    ) -> ExpertMsg {
+    pub fn respond_to_original(result: String, task: &PendingTask) -> ExpertMsg {
         ExpertMsg::PeerResponse {
             trace_id: task.trace_id,
             result,
@@ -409,10 +411,7 @@ impl BatonPass {
     }
 
     pub fn create_response(trace_id: Uuid, result: String) -> ExpertMsg {
-        ExpertMsg::PeerResponse {
-            trace_id,
-            result,
-        }
+        ExpertMsg::PeerResponse { trace_id, result }
     }
 }
 
@@ -428,6 +427,15 @@ pub(crate) fn send_work_output(envelope: &WorkEnvelope, result: String) {
             trace_id: envelope.trace_id,
             result,
         });
+    }
+}
+
+/// Zelfde route als bij voltooide peer-work in [`ExpertState`]::`handle` [`PeerResponse`].
+pub(crate) fn deliver_peer_response_result(task: &PendingTask, trace_id: Uuid, result: String) {
+    if let Some(ref reply_to) = task.reply_to {
+        let _ = reply_to.cast(ExpertMsg::PeerResponse { trace_id, result });
+    } else if let Some(ref gateway) = task.entry_reply {
+        let _ = gateway.cast(EntryMsg::ExpertResponse { trace_id, result });
     }
 }
 
@@ -495,10 +503,7 @@ impl Actor for ExpertState {
                         error = %e,
                         "Hop limit check failed"
                     );
-                    send_work_output(
-                        &envelope,
-                        format!("Error: {}", e),
-                    );
+                    send_work_output(&envelope, format!("Error: {}", e));
                     return Ok(());
                 }
 
@@ -509,10 +514,7 @@ impl Actor for ExpertState {
                             query = %q,
                             "Processing query"
                         );
-                        send_work_output(
-                            &envelope,
-                            format!("Processed by {}: {}", state.name, q),
-                        );
+                        send_work_output(&envelope, format!("Processed by {}: {}", state.name, q));
                     }
                     WorkPayload::Process(p) => {
                         tracing::info!(
@@ -520,12 +522,12 @@ impl Actor for ExpertState {
                             payload = %p,
                             "Processing work payload"
                         );
-                        send_work_output(
-                            &envelope,
-                            format!("Processed by {}: {}", state.name, p),
-                        );
+                        send_work_output(&envelope, format!("Processed by {}: {}", state.name, p));
                     }
-                    WorkPayload::Delegate { capability, payload } => {
+                    WorkPayload::Delegate {
+                        capability,
+                        payload,
+                    } => {
                         tracing::info!(
                             expert = %state.name,
                             capability = %capability,
@@ -540,7 +542,10 @@ impl Actor for ExpertState {
                     WorkPayload::Research { .. } => {
                         send_work_output(
                             &envelope,
-                            format!("{}: Research request forwarded to ResearchExpert", state.name),
+                            format!(
+                                "{}: Research request forwarded to ResearchExpert",
+                                state.name
+                            ),
                         );
                     }
                     WorkPayload::Write { .. } => {
@@ -564,7 +569,19 @@ impl Actor for ExpertState {
                     WorkPayload::CreateDocument { .. } => {
                         send_work_output(
                             &envelope,
-                            format!("{}: Document creation forwarded to DocumentOrchestrator", state.name),
+                            format!(
+                                "{}: Document creation forwarded to DocumentOrchestrator",
+                                state.name
+                            ),
+                        );
+                    }
+                    WorkPayload::ImproveDocument { .. } => {
+                        send_work_output(
+                            &envelope,
+                            format!(
+                                "{}: Document improvement forwarded to DocumentImprover",
+                                state.name
+                            ),
                         );
                     }
                 }
@@ -577,12 +594,7 @@ impl Actor for ExpertState {
                         "Peer response received, forwarding to original caller"
                     );
 
-                    if let Some(ref parent) = task.reply_to {
-                        let response = BatonPass::respond_to_original(result, &task);
-                        let _ = parent.cast(response);
-                    } else if let Some(ref gw) = task.entry_reply {
-                        let _ = gw.cast(EntryMsg::ExpertResponse { trace_id, result });
-                    }
+                    deliver_peer_response_result(&task, trace_id, result);
                 } else {
                     tracing::warn!(
                         trace_id = %trace_id,
